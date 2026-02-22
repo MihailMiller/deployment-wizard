@@ -136,6 +136,8 @@ def _print_summary(cfg) -> None:
             print(f"Proxy port   : {cfg.effective_proxy_http_port}")
     if cfg.tls_enabled:
         print(f"Domain       : {cfg.domain}")
+        if len(cfg.cert_domain_names) > 1:
+            print(f"TLS domains  : {', '.join(cfg.cert_domain_names)}")
     if cfg.auth_token is not None:
         print("Auth token   : enabled")
     else:
@@ -145,6 +147,14 @@ def _print_summary(cfg) -> None:
             f"Proxy target : "
             f"{cfg.effective_proxy_upstream_service}:{cfg.effective_proxy_upstream_port}"
         )
+        if cfg.proxy_routes:
+            print(
+                "Proxy routes : "
+                + ", ".join(
+                    f"{r.host}->{r.upstream_host}:{r.upstream_port}"
+                    for r in cfg.proxy_routes
+                )
+            )
     if cfg.source_kind.value == "compose":
         if cfg.compose_services:
             print(f"Services     : {', '.join(cfg.compose_services)}")

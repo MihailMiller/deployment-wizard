@@ -5,6 +5,7 @@ from unittest import mock
 
 from deploy_wizard.config import AccessMode, Config, SourceKind
 from deploy_wizard.service import (
+    _issue_certificate,
     _run_with_retries,
     deploy_compose_source,
     deploy_dockerfile_source,
@@ -244,6 +245,66 @@ class DeployWizardServiceTests(unittest.TestCase):
         self.assertIn(" up -d --build demo nginx", cmd)
         cert_mock.assert_called_once()
         reload_mock.assert_called_once()
+
+    def test_write_nginx_proxy_config_with_multiple_routes_tls(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n"
+                "  mail:\n"
+                "    image: example/mail:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                base_dir=Path(td) / "services",
+                access_mode=AccessMode.PUBLIC,
+                domain="api.example.com",
+                certbot_email="ops@example.com",
+                proxy_routes=(
+                    "wiki.example.com=orchestrator:8090",
+                    "mail.example.com=mail:4000",
+                ),
+            )
+            write_proxy_compose(cfg)
+            write_nginx_proxy_config(cfg, https_enabled=True)
+            nginx_content = cfg.managed_nginx_conf_path.read_text(encoding="utf-8")
+            self.assertIn("server_name wiki.example.com;", nginx_content)
+            self.assertIn("server_name mail.example.com;", nginx_content)
+            self.assertIn("proxy_pass http://orchestrator:8090;", nginx_content)
+            self.assertIn("proxy_pass http://mail:4000;", nginx_content)
+            self.assertIn(
+                "ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;",
+                nginx_content,
+            )
+
+    def test_issue_certificate_includes_route_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                access_mode=AccessMode.PUBLIC,
+                domain="api.example.com",
+                certbot_email="ops@example.com",
+                proxy_routes=("wiki.example.com=orchestrator:8090",),
+            )
+            with mock.patch("deploy_wizard.service._run_with_retries", return_value=True) as run_mock:
+                _issue_certificate(cfg)
+            cmd = run_mock.call_args[0][0]
+            self.assertIn("-d api.example.com", cmd)
+            self.assertIn("-d wiki.example.com", cmd)
 
 
 if __name__ == "__main__":

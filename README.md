@@ -62,6 +62,7 @@ Key flags:
 - `--auth-token` (enable bearer-token auth at managed proxy)
 - `--domain` + `--certbot-email` (enable nginx + certbot)
 - `--proxy-http-port` + `--proxy-https-port` (external nginx bind ports)
+- `--proxy-route HOST=UPSTREAM:PORT` (repeat for multi-host routing)
 - `--proxy-upstream-service` (compose sources)
 - `--proxy-upstream-port`
 
@@ -91,6 +92,21 @@ sudo python -m deploy_wizard deploy --batch \
   --domain api.example.com \
   --certbot-email ops@example.com \
   --proxy-upstream-port 8080
+```
+
+Multi-host reverse proxy routes example:
+
+```bash
+sudo python -m deploy_wizard deploy --batch \
+  --service-name llm-stack \
+  --source-dir /path/to/compose-source \
+  --source-kind compose \
+  --access-mode public \
+  --domain ingress.example.com \
+  --certbot-email ops@example.com \
+  --proxy-route wiki.example.com=orchestrator:8090 \
+  --proxy-route sickbeard.example.com=media:8081 \
+  --proxy-route mail.example.com=mailer:4000
 ```
 
 Tailscale-only example (no public exposure):

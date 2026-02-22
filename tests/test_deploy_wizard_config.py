@@ -204,6 +204,24 @@ class DeployWizardConfigTests(unittest.TestCase):
                     proxy_https_port=8443,
                 )
 
+    def test_proxy_http_and_https_ports_must_differ(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.DOCKERFILE,
+                    container_port=8080,
+                    host_port=18080,
+                    access_mode=AccessMode.PUBLIC,
+                    domain="api.example.com",
+                    certbot_email="ops@example.com",
+                    proxy_http_port=8081,
+                    proxy_https_port=8081,
+                )
+
     def test_compose_public_mode_requires_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             src = Path(td)
@@ -232,6 +250,97 @@ class DeployWizardConfigTests(unittest.TestCase):
                 access_mode=AccessMode.PUBLIC,
             )
             self.assertEqual(cfg.effective_bind_host, "0.0.0.0")
+
+    def test_proxy_routes_are_parsed_and_cert_domains_include_route_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n"
+                "  mail:\n"
+                "    image: example/mail:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="svc",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                access_mode=AccessMode.PUBLIC,
+                domain="api.example.com",
+                certbot_email="ops@example.com",
+                proxy_routes=(
+                    "wiki.example.com=orchestrator:8090",
+                    "mail.example.com=mail:4000",
+                ),
+            )
+            self.assertEqual(len(cfg.effective_proxy_routes), 2)
+            self.assertEqual(
+                cfg.cert_domain_names,
+                ("api.example.com", "wiki.example.com", "mail.example.com"),
+            )
+
+    def test_proxy_routes_conflict_with_single_upstream_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.COMPOSE,
+                    access_mode=AccessMode.PUBLIC,
+                    auth_token="TokenABC123",
+                    proxy_routes=("wiki.example.com=orchestrator:8090",),
+                    proxy_upstream_service="orchestrator",
+                )
+
+    def test_tls_proxy_routes_require_dns_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.COMPOSE,
+                    access_mode=AccessMode.PUBLIC,
+                    domain="api.example.com",
+                    certbot_email="ops@example.com",
+                    proxy_routes=("*.example.com=orchestrator:8090",),
+                )
+
+    def test_compose_proxy_route_upstream_must_be_in_selected_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n"
+                "  mail:\n"
+                "    image: example/mail:latest\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.COMPOSE,
+                    access_mode=AccessMode.PUBLIC,
+                    auth_token="TokenABC123",
+                    compose_services=("orchestrator",),
+                    proxy_routes=("mail.example.com=mail:4000",),
+                )
 
 
 if __name__ == "__main__":

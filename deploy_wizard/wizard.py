@@ -4,6 +4,7 @@ Interactive wizard for generic service deployment.
 
 from __future__ import annotations
 
+import re
 import socket
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import List, Optional, Tuple
 from deploy_wizard.config import (
     AccessMode,
     Config,
+    parse_proxy_route,
     SourceKind,
     detect_source_kind,
     find_compose_file,
@@ -73,6 +75,12 @@ def _choose_access_mode() -> AccessMode:
     return AccessMode(options[idx - 1][0])
 
 
+def _default_service_key(service_name: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]", "-", service_name.lower())
+    normalized = normalized.strip("-_")
+    return normalized or "service"
+
+
 def _port_available(bind_host: str, port: int) -> Tuple[bool, str]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -85,9 +93,12 @@ def _port_available(bind_host: str, port: int) -> Tuple[bool, str]:
         sock.close()
 
 
-def _suggest_port(bind_host: str, start: int) -> Optional[int]:
+def _suggest_port(bind_host: str, start: int, avoid: Optional[set] = None) -> Optional[int]:
+    blocked = avoid or set()
     presets = [8080, 8081, 8088, 8888, 9000, 9443]
     for candidate in presets:
+        if candidate in blocked:
+            continue
         if candidate < start:
             continue
         ok, _ = _port_available(bind_host, candidate)
@@ -95,23 +106,63 @@ def _suggest_port(bind_host: str, start: int) -> Optional[int]:
             return candidate
     upper = min(start + 500, 65535)
     for candidate in range(max(1024, start), upper + 1):
+        if candidate in blocked:
+            continue
         ok, _ = _port_available(bind_host, candidate)
         if ok:
             return candidate
     return None
 
 
-def _pick_open_port(label: str, bind_host: str, default: int) -> int:
+def _pick_open_port(
+    label: str,
+    bind_host: str,
+    default: int,
+    avoid: Optional[set] = None,
+) -> int:
+    blocked = avoid or set()
     while True:
         port = _prompt_int(label, default)
+        if port in blocked:
+            print(f"Port {port} is already reserved in this deployment. Choose another port.")
+            continue
         ok, err = _port_available(bind_host, port)
         if ok:
             return port
         print(f"Port {bind_host}:{port} is unavailable: {err}")
-        suggestion = _suggest_port(bind_host, 8080 if port < 1024 else port + 1)
+        suggestion = _suggest_port(
+            bind_host,
+            8080 if port < 1024 else port + 1,
+            avoid=blocked,
+        )
         if suggestion is not None and _confirm(f"Use suggested port {suggestion}?", default=True):
             return suggestion
         print("Choose another port.")
+
+
+def _pick_proxy_routes(
+    *,
+    default_host: str,
+    default_upstream: str,
+    default_port: int,
+) -> Optional[Tuple[str, ...]]:
+    if not _confirm("Configure hostname-based proxy routes?", default=False):
+        return None
+    print("Enter routes as <host>=<upstream>:<port>. Example: wiki.example.com=orchestrator:8090")
+    routes: List[str] = []
+    default_route = f"{default_host}={default_upstream}:{default_port}"
+    while True:
+        prompt_default = default_route if not routes else ""
+        raw = _prompt("Proxy route", prompt_default)
+        try:
+            route = parse_proxy_route(raw)
+        except ValueError as exc:
+            print(f"Invalid route: {exc}")
+            continue
+        routes.append(f"{route.host}={route.upstream_host}:{route.upstream_port}")
+        if not _confirm("Add another route?", default=False):
+            break
+    return tuple(routes)
 
 
 def _choose_services(services: List[str]) -> Optional[Tuple[str, ...]]:
@@ -200,6 +251,7 @@ def run_wizard() -> Config:
     auth_token: Optional[str] = None
     proxy_upstream_service: Optional[str] = None
     proxy_upstream_port: Optional[int] = None
+    proxy_routes: Optional[Tuple[str, ...]] = None
     proxy_http_port: Optional[int] = None
     proxy_https_port: Optional[int] = None
 
@@ -249,26 +301,47 @@ def run_wizard() -> Config:
         proxy_bind_host = "0.0.0.0" if access_mode == AccessMode.PUBLIC else "127.0.0.1"
         proxy_http_port = _pick_open_port("Proxy HTTP host port", proxy_bind_host, 80)
         if domain is not None:
-            proxy_https_port = _pick_open_port("Proxy HTTPS host port", proxy_bind_host, 443)
+            proxy_https_port = _pick_open_port(
+                "Proxy HTTPS host port",
+                proxy_bind_host,
+                443,
+                avoid={proxy_http_port},
+            )
             if proxy_http_port != 80:
                 print(
                     "Warning: Let's Encrypt HTTP-01 normally requires external port 80. "
                     "Use host/network forwarding from :80 to this selected proxy HTTP port."
                 )
+        default_upstream = _default_service_key(service_name)
+        default_upstream_port = container_port or 8080
         if source_kind == SourceKind.COMPOSE:
-            default_service = ""
             if compose_services:
-                default_service = compose_services[0]
+                default_upstream = compose_services[0]
             elif discovered_services:
-                default_service = discovered_services[0]
-            if default_service:
-                proxy_upstream_service = _prompt("Upstream compose service", default_service)
-            proxy_upstream_port = _prompt_int("Upstream container port", 80)
+                default_upstream = discovered_services[0]
+            default_upstream_port = 80
+        default_host = domain or "_"
+        proxy_routes = _pick_proxy_routes(
+            default_host=default_host,
+            default_upstream=default_upstream,
+            default_port=default_upstream_port,
+        )
+        if source_kind == SourceKind.COMPOSE:
+            if proxy_routes is None:
+                default_service = ""
+                if compose_services:
+                    default_service = compose_services[0]
+                elif discovered_services:
+                    default_service = discovered_services[0]
+                if default_service:
+                    proxy_upstream_service = _prompt("Upstream compose service", default_service)
+                proxy_upstream_port = _prompt_int("Upstream container port", 80)
         else:
-            if container_port is not None:
-                proxy_upstream_port = container_port
-            else:
-                proxy_upstream_port = _prompt_int("Application container port for proxy", 8080)
+            if proxy_routes is None:
+                if container_port is not None:
+                    proxy_upstream_port = container_port
+                else:
+                    proxy_upstream_port = _prompt_int("Application container port for proxy", 8080)
 
     cfg = Config(
         service_name=service_name,
@@ -285,6 +358,7 @@ def run_wizard() -> Config:
         auth_token=auth_token,
         proxy_http_port=proxy_http_port,
         proxy_https_port=proxy_https_port,
+        proxy_routes=proxy_routes,
         proxy_upstream_service=proxy_upstream_service,
         proxy_upstream_port=proxy_upstream_port,
     )
@@ -324,6 +398,12 @@ def run_wizard() -> Config:
             f"  Proxy target : "
             f"{cfg.effective_proxy_upstream_service}:{cfg.effective_proxy_upstream_port}"
         )
+    if cfg.proxy_routes:
+        rendered = ", ".join(
+            f"{r.host}->{r.upstream_host}:{r.upstream_port}"
+            for r in cfg.proxy_routes
+        )
+        print(f"  Proxy routes : {rendered}")
     if cfg.auth_token is not None:
         print("  Auth token   : enabled")
     else:

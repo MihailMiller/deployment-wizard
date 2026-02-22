@@ -164,9 +164,8 @@ def write_proxy_compose(cfg: Config) -> None:
 def write_nginx_proxy_config(cfg: Config, *, https_enabled: bool) -> None:
     if not cfg.reverse_proxy_enabled:
         return
-    domain = cfg.domain or ""
-    upstream = cfg.effective_proxy_upstream_service
-    upstream_port = cfg.effective_proxy_upstream_port
+    routes = cfg.effective_proxy_routes
+    cert_base_domain = cfg.domain or ""
     auth_guard = ""
     if cfg.auth_token is not None:
         auth_guard = (
@@ -174,80 +173,93 @@ def write_nginx_proxy_config(cfg: Config, *, https_enabled: bool) -> None:
             "            return 401;\n"
             "        }\n"
         )
-
+    route_blocks = []
     if not cfg.tls_enabled:
-        content = (
-            "server {\n"
-            "    listen 80;\n"
-            "    server_name _;\n"
-            "\n"
-            "    location / {\n"
-            f"{auth_guard}"
-            f"        proxy_pass http://{upstream}:{upstream_port};\n"
-            "        proxy_http_version 1.1;\n"
-            "        proxy_set_header Host $host;\n"
-            "        proxy_set_header X-Real-IP $remote_addr;\n"
-            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-            "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-            "    }\n"
-            "}\n"
-        )
+        for route in routes:
+            route_blocks.append(
+                (
+                    "server {\n"
+                    "    listen 80;\n"
+                    f"    server_name {route.host};\n"
+                    "\n"
+                    "    location / {\n"
+                    f"{auth_guard}"
+                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
+                    "        proxy_http_version 1.1;\n"
+                    "        proxy_set_header Host $host;\n"
+                    "        proxy_set_header X-Real-IP $remote_addr;\n"
+                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                    "    }\n"
+                    "}\n"
+                )
+            )
     elif not https_enabled:
-        content = (
-            "server {\n"
-            "    listen 80;\n"
-            f"    server_name {domain};\n"
-            "\n"
-            "    location /.well-known/acme-challenge/ {\n"
-            "        root /var/www/certbot;\n"
-            "    }\n"
-            "\n"
-            "    location / {\n"
-            f"{auth_guard}"
-            f"        proxy_pass http://{upstream}:{upstream_port};\n"
-            "        proxy_http_version 1.1;\n"
-            "        proxy_set_header Host $host;\n"
-            "        proxy_set_header X-Real-IP $remote_addr;\n"
-            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-            "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-            "    }\n"
-            "}\n"
-        )
+        for route in routes:
+            route_blocks.append(
+                (
+                    "server {\n"
+                    "    listen 80;\n"
+                    f"    server_name {route.host};\n"
+                    "\n"
+                    "    location /.well-known/acme-challenge/ {\n"
+                    "        root /var/www/certbot;\n"
+                    "    }\n"
+                    "\n"
+                    "    location / {\n"
+                    f"{auth_guard}"
+                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
+                    "        proxy_http_version 1.1;\n"
+                    "        proxy_set_header Host $host;\n"
+                    "        proxy_set_header X-Real-IP $remote_addr;\n"
+                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                    "    }\n"
+                    "}\n"
+                )
+            )
     else:
-        content = (
-            "server {\n"
-            "    listen 80;\n"
-            f"    server_name {domain};\n"
-            "\n"
-            "    location /.well-known/acme-challenge/ {\n"
-            "        root /var/www/certbot;\n"
-            "    }\n"
-            "\n"
-            "    location / {\n"
-            "        return 301 https://$host$request_uri;\n"
-            "    }\n"
-            "}\n"
-            "\n"
-            "server {\n"
-            "    listen 443 ssl;\n"
-            f"    server_name {domain};\n"
-            "\n"
-            f"    ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;\n"
-            f"    ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;\n"
-            "    ssl_protocols TLSv1.2 TLSv1.3;\n"
-            "    ssl_prefer_server_ciphers on;\n"
-            "\n"
-            "    location / {\n"
-            f"{auth_guard}"
-            f"        proxy_pass http://{upstream}:{upstream_port};\n"
-            "        proxy_http_version 1.1;\n"
-            "        proxy_set_header Host $host;\n"
-            "        proxy_set_header X-Real-IP $remote_addr;\n"
-            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-            "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-            "    }\n"
-            "}\n"
-        )
+        for route in routes:
+            route_blocks.append(
+                (
+                    "server {\n"
+                    "    listen 80;\n"
+                    f"    server_name {route.host};\n"
+                    "\n"
+                    "    location /.well-known/acme-challenge/ {\n"
+                    "        root /var/www/certbot;\n"
+                    "    }\n"
+                    "\n"
+                    "    location / {\n"
+                    "        return 301 https://$host$request_uri;\n"
+                    "    }\n"
+                    "}\n"
+                )
+            )
+            route_blocks.append(
+                (
+                    "server {\n"
+                    "    listen 443 ssl;\n"
+                    f"    server_name {route.host};\n"
+                    "\n"
+                    f"    ssl_certificate /etc/letsencrypt/live/{cert_base_domain}/fullchain.pem;\n"
+                    f"    ssl_certificate_key /etc/letsencrypt/live/{cert_base_domain}/privkey.pem;\n"
+                    "    ssl_protocols TLSv1.2 TLSv1.3;\n"
+                    "    ssl_prefer_server_ciphers on;\n"
+                    "\n"
+                    "    location / {\n"
+                    f"{auth_guard}"
+                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
+                    "        proxy_http_version 1.1;\n"
+                    "        proxy_set_header Host $host;\n"
+                    "        proxy_set_header X-Real-IP $remote_addr;\n"
+                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                    "    }\n"
+                    "}\n"
+                )
+            )
+    content = "\n".join(route_blocks) + "\n"
     write_file(cfg.managed_nginx_conf_path, content)
 
 
@@ -274,15 +286,19 @@ def _compose_prefix(cfg: Config) -> str:
 def _issue_certificate(cfg: Config) -> None:
     if not cfg.tls_enabled:
         return
-    domain = cfg.domain or ""
+    domains = cfg.cert_domain_names
+    if not domains:
+        die("No certificate domains configured for certbot.")
+    primary_domain = domains[0]
     certbot_email = cfg.certbot_email or ""
+    domains_arg = " ".join(f"-d {quote(name)}" for name in domains)
     cmd = (
         f"cd {quote(str(_compose_workdir(cfg)))} && "
         f"{_compose_prefix(cfg)} run --rm certbot "
         f"certonly --webroot -w /var/www/certbot "
         f"--agree-tos --non-interactive --no-eff-email "
         f"--email {quote(certbot_email)} "
-        f"-d {quote(domain)} "
+        f"{domains_arg} "
         "--keep-until-expiring"
     )
     if not _run_with_retries(
@@ -293,7 +309,8 @@ def _issue_certificate(cfg: Config) -> None:
     ):
         die(
             "Certbot certificate issuance failed after retries. "
-            "Check DNS A/AAAA records and firewall rules for port 80."
+            f"Check DNS A/AAAA records and firewall rules for port 80. "
+            f"Primary cert domain: {primary_domain}."
         )
 
 

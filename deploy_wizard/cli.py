@@ -105,6 +105,16 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
         ),
     )
     parser.add_argument(
+        "--proxy-route",
+        action="append",
+        default=None,
+        metavar="HOST=UPSTREAM:PORT",
+        help=(
+            "Hostname-based proxy route. Repeat for multiple routes, e.g. "
+            "--proxy-route wiki.example.com=orchestrator:8090"
+        ),
+    )
+    parser.add_argument(
         "--proxy-upstream-port",
         type=int,
         default=None,
@@ -149,6 +159,7 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
             auth_token=raw.auth_token,
             proxy_http_port=raw.proxy_http_port,
             proxy_https_port=raw.proxy_https_port,
+            proxy_routes=tuple(raw.proxy_route) if raw.proxy_route else None,
             proxy_upstream_service=raw.proxy_upstream_service,
             proxy_upstream_port=raw.proxy_upstream_port,
         )

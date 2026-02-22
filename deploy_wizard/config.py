@@ -29,6 +29,56 @@ _DOMAIN_RE = re.compile(
 )
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+\-]{8,}$")
+_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9*_.-]+$")
+_UPSTREAM_HOST_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+@dataclass(frozen=True)
+class ProxyRoute:
+    host: str
+    upstream_host: str
+    upstream_port: int
+
+
+def parse_proxy_route(raw: str) -> ProxyRoute:
+    text = str(raw).strip()
+    if not text:
+        raise ValueError("proxy_route must not be empty.")
+    if "=" not in text:
+        raise ValueError(
+            "proxy_route format must be '<host>=<upstream-host>:<port>'."
+        )
+    host_part, target_part = text.split("=", 1)
+    host = host_part.strip().lower()
+    target = target_part.strip()
+    if ":" not in target:
+        raise ValueError(
+            "proxy_route target must include port, e.g. api:8080."
+        )
+    upstream_host, port_raw = target.rsplit(":", 1)
+    upstream_host = upstream_host.strip()
+    port_text = port_raw.strip()
+
+    if not host:
+        raise ValueError("proxy_route host must not be empty.")
+    if not _SERVER_NAME_RE.fullmatch(host):
+        raise ValueError(
+            "proxy_route host is invalid. "
+            "Use a hostname/wildcard server_name like app.example.com."
+        )
+    if not upstream_host or not _UPSTREAM_HOST_RE.fullmatch(upstream_host):
+        raise ValueError(
+            "proxy_route upstream host is invalid. "
+            "Use letters, numbers, '.', '_', '-'."
+        )
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise ValueError("proxy_route upstream port must be an integer.") from exc
+    if not (1 <= port <= 65535):
+        raise ValueError("proxy_route upstream port must be between 1 and 65535.")
+
+    return ProxyRoute(host=host, upstream_host=upstream_host, upstream_port=port)
 
 
 def find_compose_file(source_dir: Path) -> Optional[Path]:
@@ -126,6 +176,7 @@ class Config:
     auth_token: Optional[str] = None
     proxy_http_port: Optional[int] = None
     proxy_https_port: Optional[int] = None
+    proxy_routes: Optional[Tuple[ProxyRoute, ...]] = None
     proxy_upstream_service: Optional[str] = None
     proxy_upstream_port: Optional[int] = None
 
@@ -204,11 +255,22 @@ class Config:
             if self.auth_token is not None
             else None
         )
+        proxy_routes_raw = self.proxy_routes
         proxy_upstream_service = (
             str(self.proxy_upstream_service).strip()
             if self.proxy_upstream_service is not None
             else None
         )
+        normalized_routes: List[ProxyRoute] = []
+        if proxy_routes_raw is not None:
+            seen_hosts = set()
+            for item in proxy_routes_raw:
+                route = item if isinstance(item, ProxyRoute) else parse_proxy_route(item)
+                if route.host in seen_hosts:
+                    raise ValueError(f"proxy_routes contains duplicate host: {route.host}")
+                seen_hosts.add(route.host)
+                normalized_routes.append(route)
+            object.__setattr__(self, "proxy_routes", tuple(normalized_routes))
 
         if domain is not None:
             object.__setattr__(self, "domain", domain)
@@ -235,6 +297,12 @@ class Config:
         if self.auth_token is not None and not _TOKEN_RE.fullmatch(self.auth_token):
             raise ValueError(
                 "auth_token must be >= 8 chars and only contain [A-Za-z0-9._~+-]."
+            )
+        if self.proxy_routes and (
+            self.proxy_upstream_service is not None or self.proxy_upstream_port is not None
+        ):
+            raise ValueError(
+                "proxy_routes cannot be combined with proxy_upstream_service/proxy_upstream_port."
             )
 
         if (
@@ -289,11 +357,36 @@ class Config:
                     raise ValueError(
                         "proxy_upstream_service must be included in compose_services."
                     )
+            if self.proxy_routes:
+                known_services = set(
+                    list_compose_services(self.source_compose_path or Path("/__none__"))
+                )
+                for route in self.proxy_routes:
+                    if self.tls_enabled and not _DOMAIN_RE.fullmatch(route.host):
+                        raise ValueError(
+                            f"proxy_route host '{route.host}' must be a valid DNS "
+                            "name for certbot HTTP-01."
+                        )
+                    if (
+                        resolved_kind == SourceKind.COMPOSE
+                        and known_services
+                        and route.upstream_host in known_services
+                        and self.compose_services
+                        and route.upstream_host not in self.compose_services
+                    ):
+                        raise ValueError(
+                            f"proxy_route upstream '{route.upstream_host}' must be "
+                            "included in compose_services."
+                        )
             _ = self.effective_proxy_upstream_service
             _ = self.effective_proxy_upstream_port
             _ = self.effective_proxy_http_port
             if self.tls_enabled:
                 _ = self.effective_proxy_https_port
+                if self.effective_proxy_http_port == self.effective_proxy_https_port:
+                    raise ValueError(
+                        "proxy_http_port and proxy_https_port must be different."
+                    )
         else:
             if (
                 self.auth_token is not None
@@ -347,7 +440,7 @@ class Config:
 
     @property
     def reverse_proxy_enabled(self) -> bool:
-        return self.tls_enabled or self.auth_token is not None
+        return self.tls_enabled or self.auth_token is not None or self.proxy_routes is not None
 
     @property
     def effective_bind_host(self) -> str:
@@ -356,9 +449,38 @@ class Config:
         return self.bind_host
 
     @property
+    def effective_proxy_routes(self) -> Tuple[ProxyRoute, ...]:
+        if not self.reverse_proxy_enabled:
+            raise ValueError("No routes without proxy mode.")
+        if self.proxy_routes:
+            return self.proxy_routes
+        host = self.domain if self.domain is not None else "_"
+        return (
+            ProxyRoute(
+                host=host,
+                upstream_host=self.effective_proxy_upstream_service,
+                upstream_port=self.effective_proxy_upstream_port,
+            ),
+        )
+
+    @property
+    def cert_domain_names(self) -> Tuple[str, ...]:
+        if not self.tls_enabled:
+            return tuple()
+        names: List[str] = []
+        if self.domain is not None:
+            names.append(self.domain)
+        for route in self.effective_proxy_routes:
+            if _DOMAIN_RE.fullmatch(route.host) and route.host not in names:
+                names.append(route.host)
+        return tuple(names)
+
+    @property
     def effective_proxy_upstream_service(self) -> str:
         if not self.reverse_proxy_enabled:
             raise ValueError("No upstream service without proxy mode.")
+        if self.proxy_routes:
+            return self.proxy_routes[0].upstream_host
         if self.source_kind == SourceKind.DOCKERFILE:
             return self.service_key
         if self.proxy_upstream_service:
@@ -379,6 +501,8 @@ class Config:
     def effective_proxy_upstream_port(self) -> int:
         if not self.reverse_proxy_enabled:
             raise ValueError("No upstream port without proxy mode.")
+        if self.proxy_routes:
+            return self.proxy_routes[0].upstream_port
         if self.proxy_upstream_port is not None:
             return int(self.proxy_upstream_port)
         if self.container_port is not None:

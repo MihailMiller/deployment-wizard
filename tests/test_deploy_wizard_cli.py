@@ -99,6 +99,38 @@ class DeployWizardCliTests(unittest.TestCase):
             self.assertEqual(cfg.effective_proxy_http_port, 8088)
             self.assertEqual(cfg.effective_proxy_https_port, 8443)
 
+    def test_build_config_with_proxy_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n"
+                "  mail:\n"
+                "    image: example/mail:latest\n",
+                encoding="utf-8",
+            )
+            cfg = build_config(
+                [
+                    "--service-name",
+                    "demo",
+                    "--source-dir",
+                    str(src),
+                    "--access-mode",
+                    "public",
+                    "--auth-token",
+                    "TokenABC123",
+                    "--proxy-route",
+                    "wiki.example.com=orchestrator:8090",
+                    "--proxy-route",
+                    "mail.example.com=mail:4000",
+                    "--proxy-http-port",
+                    "8088",
+                ]
+            )
+            self.assertEqual(len(cfg.proxy_routes or ()), 2)
+            self.assertEqual(cfg.effective_proxy_routes[0].host, "wiki.example.com")
+
     def test_build_config_with_auth_token_and_access_mode(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             src = Path(td)
@@ -144,6 +176,7 @@ class DeployWizardCliTests(unittest.TestCase):
         self.assertIn("--access-mode", proc.stdout)
         self.assertIn("--proxy-http-port", proc.stdout)
         self.assertIn("--proxy-https-port", proc.stdout)
+        self.assertIn("--proxy-route", proc.stdout)
 
 
 if __name__ == "__main__":
