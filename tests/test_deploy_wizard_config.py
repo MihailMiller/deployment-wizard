@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deploy_wizard.config import Config, SourceKind, list_compose_services
+from deploy_wizard.config import AccessMode, Config, SourceKind, list_compose_services
 
 
 class DeployWizardConfigTests(unittest.TestCase):
@@ -101,6 +101,121 @@ class DeployWizardConfigTests(unittest.TestCase):
                     source_kind=SourceKind.DOCKERFILE,
                     compose_services=("api",),
                 )
+
+    def test_tls_dockerfile_uses_container_port_as_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+            cfg = Config(
+                service_name="svc",
+                source_dir=src,
+                source_kind=SourceKind.DOCKERFILE,
+                container_port=8080,
+                host_port=18080,
+                access_mode=AccessMode.PUBLIC,
+                domain="api.example.com",
+                certbot_email="ops@example.com",
+            )
+            self.assertTrue(cfg.tls_enabled)
+            self.assertEqual(cfg.effective_proxy_upstream_service, "svc")
+            self.assertEqual(cfg.effective_proxy_upstream_port, 8080)
+
+    def test_tls_compose_requires_upstream_port(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  api:\n"
+                "    image: example/api:latest\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.COMPOSE,
+                    access_mode=AccessMode.PUBLIC,
+                    domain="api.example.com",
+                    certbot_email="ops@example.com",
+                )
+
+    def test_proxy_settings_require_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    certbot_email="ops@example.com",
+                )
+
+    def test_proxy_upstream_service_must_be_selected_if_subset_deployed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  api:\n"
+                "    image: example/api:latest\n"
+                "  worker:\n"
+                "    image: example/worker:latest\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    access_mode=AccessMode.PUBLIC,
+                    domain="api.example.com",
+                    certbot_email="ops@example.com",
+                    proxy_upstream_service="worker",
+                    proxy_upstream_port=8080,
+                    compose_services=("api",),
+                )
+
+    def test_auth_token_enables_proxy_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+            cfg = Config(
+                service_name="svc",
+                source_dir=src,
+                source_kind=SourceKind.DOCKERFILE,
+                container_port=8080,
+                host_port=18080,
+                auth_token="TokenABC123",
+            )
+            self.assertTrue(cfg.reverse_proxy_enabled)
+            self.assertEqual(cfg.effective_proxy_upstream_port, 8080)
+
+    def test_compose_public_mode_requires_proxy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  api:\n"
+                "    image: example/api:latest\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.COMPOSE,
+                    access_mode=AccessMode.PUBLIC,
+                )
+
+    def test_public_access_mode_sets_bind_host(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+            cfg = Config(
+                service_name="svc",
+                source_dir=src,
+                source_kind=SourceKind.DOCKERFILE,
+                access_mode=AccessMode.PUBLIC,
+            )
+            self.assertEqual(cfg.effective_bind_host, "0.0.0.0")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from deploy_wizard.config import Config, SourceKind
+from deploy_wizard.config import AccessMode, Config, SourceKind
 
 
 def build_config(argv: Optional[List[str]] = None) -> Config:
@@ -42,6 +42,13 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
         help="Host bind address used with generated compose port mappings.",
     )
     parser.add_argument(
+        "--access-mode",
+        default=AccessMode.LOCALHOST.value,
+        choices=[k.value for k in AccessMode],
+        metavar="MODE",
+        help="Network exposure profile: localhost, tailscale, or public.",
+    )
+    parser.add_argument(
         "--registry-retries",
         type=int,
         default=4,
@@ -70,6 +77,43 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
             "Default: deploy all services."
         ),
     )
+    parser.add_argument(
+        "--domain",
+        default=None,
+        metavar="DOMAIN",
+        help="Enable nginx reverse proxy + certbot for this public domain.",
+    )
+    parser.add_argument(
+        "--certbot-email",
+        default=None,
+        metavar="EMAIL",
+        help="Email address used for Let's Encrypt registration.",
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        metavar="TOKEN",
+        help="Require Authorization: Bearer <token> at the managed nginx proxy.",
+    )
+    parser.add_argument(
+        "--proxy-upstream-service",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Upstream compose service for nginx proxy. "
+            "Only used for compose sources."
+        ),
+    )
+    parser.add_argument(
+        "--proxy-upstream-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help=(
+            "Upstream container port for nginx proxy. "
+            "Required in proxy mode unless --container-port is set."
+        ),
+    )
 
     raw = parser.parse_args(argv)
     try:
@@ -81,10 +125,16 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
             host_port=raw.host_port,
             container_port=raw.container_port,
             bind_host=raw.bind_host,
+            access_mode=AccessMode(raw.access_mode),
             registry_retries=raw.registry_retries,
             retry_backoff_seconds=raw.retry_backoff_seconds,
             tune_docker_daemon=not raw.no_docker_daemon_tuning,
             compose_services=tuple(raw.compose_service) if raw.compose_service else None,
+            domain=raw.domain,
+            certbot_email=raw.certbot_email,
+            auth_token=raw.auth_token,
+            proxy_upstream_service=raw.proxy_upstream_service,
+            proxy_upstream_port=raw.proxy_upstream_port,
         )
     except ValueError as exc:
         parser.error(str(exc))

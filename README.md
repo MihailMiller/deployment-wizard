@@ -12,6 +12,9 @@ It deploys a service from a local directory that contains either:
 - Service-name based deployment isolation via Docker Compose project names
 - Auto-detect compose vs Dockerfile sources
 - Compose service multi-select (deploy all or chosen services)
+- Access modes: `localhost`, `tailscale`, `public`
+- Optional bearer-token authentication at managed nginx proxy
+- Optional nginx reverse proxy with Let's Encrypt (certbot)
 - Idempotent host bootstrap for Ubuntu + Docker
 - Automatic retry for transient Docker registry/network failures
 - Docker daemon network tuning to reduce `connection reset by peer` pull errors
@@ -51,10 +54,54 @@ Key flags:
 - `--base-dir`
 - `--host-port` + `--container-port` (for Dockerfile mode)
 - `--bind-host`
+- `--access-mode {localhost,tailscale,public}`
 - `--compose-service` (repeat for multiple compose services; default is all)
 - `--registry-retries`
 - `--retry-backoff-seconds`
 - `--no-docker-daemon-tuning`
+- `--auth-token` (enable bearer-token auth at managed proxy)
+- `--domain` + `--certbot-email` (enable nginx + certbot)
+- `--proxy-upstream-service` (compose sources)
+- `--proxy-upstream-port`
+
+Notes:
+- For compose sources, `--access-mode` values other than `localhost` require managed proxy mode (`--domain` or `--auth-token`).
+- `--domain` (Let's Encrypt HTTP-01) requires `--access-mode public`.
+
+TLS reverse proxy example:
+
+```bash
+sudo python -m deploy_wizard deploy --batch \
+  --service-name my-service \
+  --source-dir /path/to/service \
+  --access-mode public \
+  --auth-token supersecret-token \
+  --proxy-upstream-port 8080
+```
+
+Public TLS reverse proxy example:
+
+```bash
+sudo python -m deploy_wizard deploy --batch \
+  --service-name my-service \
+  --source-dir /path/to/service \
+  --access-mode public \
+  --domain api.example.com \
+  --certbot-email ops@example.com \
+  --proxy-upstream-port 8080
+```
+
+Tailscale-only example (no public exposure):
+
+```bash
+sudo python -m deploy_wizard deploy --batch \
+  --service-name my-service \
+  --source-dir /path/to/service \
+  --source-kind dockerfile \
+  --host-port 18080 \
+  --container-port 8080 \
+  --access-mode tailscale
+```
 
 ## Network Hardening
 

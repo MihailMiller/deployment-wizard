@@ -17,7 +17,18 @@ class SourceKind(str, Enum):
     DOCKERFILE = "dockerfile"
 
 
+class AccessMode(str, Enum):
+    LOCALHOST = "localhost"
+    TAILSCALE = "tailscale"
+    PUBLIC = "public"
+
+
 _SERVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$"
+)
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+\-]{8,}$")
 
 
 def find_compose_file(source_dir: Path) -> Optional[Path]:
@@ -105,10 +116,16 @@ class Config:
     host_port: Optional[int] = None
     container_port: Optional[int] = None
     bind_host: str = "127.0.0.1"
+    access_mode: AccessMode = AccessMode.LOCALHOST
     registry_retries: int = 4
     retry_backoff_seconds: int = 5
     tune_docker_daemon: bool = True
     compose_services: Optional[Tuple[str, ...]] = None
+    domain: Optional[str] = None
+    certbot_email: Optional[str] = None
+    auth_token: Optional[str] = None
+    proxy_upstream_service: Optional[str] = None
+    proxy_upstream_port: Optional[int] = None
 
     def __post_init__(self) -> None:
         if not _SERVICE_NAME_RE.fullmatch(self.service_name):
@@ -174,6 +191,104 @@ class Config:
                             + ", ".join(sorted(known_services))
                         )
 
+        domain = str(self.domain).strip().lower() if self.domain is not None else None
+        certbot_email = (
+            str(self.certbot_email).strip().lower()
+            if self.certbot_email is not None
+            else None
+        )
+        auth_token = (
+            str(self.auth_token).strip()
+            if self.auth_token is not None
+            else None
+        )
+        proxy_upstream_service = (
+            str(self.proxy_upstream_service).strip()
+            if self.proxy_upstream_service is not None
+            else None
+        )
+
+        if domain is not None:
+            object.__setattr__(self, "domain", domain)
+        if certbot_email is not None:
+            object.__setattr__(self, "certbot_email", certbot_email)
+        if auth_token is not None:
+            object.__setattr__(self, "auth_token", auth_token)
+        if proxy_upstream_service is not None:
+            object.__setattr__(self, "proxy_upstream_service", proxy_upstream_service)
+
+        if self.proxy_upstream_port is not None and not (
+            1 <= int(self.proxy_upstream_port) <= 65535
+        ):
+            raise ValueError("proxy_upstream_port must be between 1 and 65535.")
+
+        if self.auth_token is not None and not _TOKEN_RE.fullmatch(self.auth_token):
+            raise ValueError(
+                "auth_token must be >= 8 chars and only contain [A-Za-z0-9._~+-]."
+            )
+
+        if (
+            resolved_kind == SourceKind.COMPOSE
+            and self.access_mode != AccessMode.LOCALHOST
+            and not self.reverse_proxy_enabled
+        ):
+            raise ValueError(
+                "access_mode for compose sources requires domain or auth_token "
+                "(managed proxy mode)."
+            )
+
+        if self.tls_enabled:
+            if self.domain is None or not _DOMAIN_RE.fullmatch(self.domain):
+                raise ValueError("domain must be a valid DNS name, e.g. api.example.com.")
+            if self.certbot_email is None or not _EMAIL_RE.fullmatch(self.certbot_email):
+                raise ValueError("certbot_email must be a valid email address.")
+            if self.access_mode != AccessMode.PUBLIC:
+                raise ValueError(
+                    "domain/certbot mode requires access_mode=public "
+                    "for HTTP-01 challenge reachability."
+                )
+        else:
+            if self.certbot_email is not None:
+                raise ValueError("certbot_email requires domain.")
+
+        if self.reverse_proxy_enabled:
+            if resolved_kind == SourceKind.DOCKERFILE and self.proxy_upstream_service:
+                raise ValueError(
+                    "proxy_upstream_service is only supported for compose sources."
+                )
+            if self.proxy_upstream_service and not _SERVICE_NAME_RE.fullmatch(
+                self.proxy_upstream_service
+            ):
+                raise ValueError(
+                    "proxy_upstream_service is invalid. "
+                    "Use letters, numbers, '.', '_', '-'."
+                )
+            if resolved_kind == SourceKind.COMPOSE and self.proxy_upstream_service:
+                known = set(list_compose_services(self.source_compose_path or Path("/__none__")))
+                if known and self.proxy_upstream_service not in known:
+                    raise ValueError(
+                        "proxy_upstream_service must be one of: "
+                        + ", ".join(sorted(known))
+                    )
+                if (
+                    self.compose_services
+                    and self.proxy_upstream_service not in self.compose_services
+                ):
+                    raise ValueError(
+                        "proxy_upstream_service must be included in compose_services."
+                    )
+            _ = self.effective_proxy_upstream_service
+            _ = self.effective_proxy_upstream_port
+        else:
+            if (
+                self.auth_token is not None
+                or self.proxy_upstream_service is not None
+                or self.proxy_upstream_port is not None
+            ):
+                raise ValueError(
+                    "auth/proxy settings require domain or auth_token to enable proxy mode."
+                )
+
     @property
     def service_dir(self) -> Path:
         return self.base_dir / self.service_name
@@ -200,3 +315,58 @@ class Config:
     @property
     def managed_compose_path(self) -> Path:
         return self.service_dir / "docker-compose.generated.yml"
+
+    @property
+    def managed_proxy_compose_path(self) -> Path:
+        return self.service_dir / "docker-compose.proxy.yml"
+
+    @property
+    def managed_nginx_conf_path(self) -> Path:
+        return self.service_dir / "nginx" / "default.conf"
+
+    @property
+    def tls_enabled(self) -> bool:
+        return self.domain is not None
+
+    @property
+    def reverse_proxy_enabled(self) -> bool:
+        return self.tls_enabled or self.auth_token is not None
+
+    @property
+    def effective_bind_host(self) -> str:
+        if self.access_mode == AccessMode.PUBLIC:
+            return "0.0.0.0"
+        return self.bind_host
+
+    @property
+    def effective_proxy_upstream_service(self) -> str:
+        if not self.reverse_proxy_enabled:
+            raise ValueError("No upstream service without proxy mode.")
+        if self.source_kind == SourceKind.DOCKERFILE:
+            return self.service_key
+        if self.proxy_upstream_service:
+            return self.proxy_upstream_service
+        if self.compose_services:
+            return self.compose_services[0]
+        compose_path = self.source_compose_path
+        if compose_path is not None:
+            discovered = list_compose_services(compose_path)
+            if discovered:
+                return discovered[0]
+        raise ValueError(
+            "Could not infer compose upstream service. "
+            "Set proxy_upstream_service explicitly."
+        )
+
+    @property
+    def effective_proxy_upstream_port(self) -> int:
+        if not self.reverse_proxy_enabled:
+            raise ValueError("No upstream port without proxy mode.")
+        if self.proxy_upstream_port is not None:
+            return int(self.proxy_upstream_port)
+        if self.container_port is not None:
+            return int(self.container_port)
+        raise ValueError(
+            "Proxy mode requires proxy_upstream_port "
+            "(or container_port for dockerfile sources)."
+        )

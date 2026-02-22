@@ -115,13 +115,28 @@ def _print_summary(cfg) -> None:
     print(f"Service name : {cfg.service_name}")
     print(f"Source dir   : {cfg.source_dir}")
     print(f"Source kind  : {cfg.source_kind.value}")
+    print(f"Access mode  : {cfg.access_mode.value}")
     print(f"Project dir  : {cfg.service_dir}")
     print(f"Retries      : {cfg.registry_retries} (backoff {cfg.retry_backoff_seconds}s)")
     print(f"Docker tune  : {'enabled' if cfg.tune_docker_daemon else 'disabled'}")
     if cfg.source_kind.value == "dockerfile":
-        print(f"Compose file : {cfg.managed_compose_path}")
+        compose_file = cfg.managed_compose_path
     else:
-        print(f"Compose file : {cfg.source_compose_path}")
+        compose_file = cfg.source_compose_path
+    print(f"Compose file : {compose_file}")
+    if cfg.reverse_proxy_enabled:
+        print(f"Proxy file   : {cfg.managed_proxy_compose_path}")
+    if cfg.tls_enabled:
+        print(f"Domain       : {cfg.domain}")
+    if cfg.auth_token is not None:
+        print("Auth token   : enabled")
+    else:
+        print("Auth token   : disabled")
+    if cfg.reverse_proxy_enabled:
+        print(
+            f"Proxy target : "
+            f"{cfg.effective_proxy_upstream_service}:{cfg.effective_proxy_upstream_port}"
+        )
     if cfg.source_kind.value == "compose":
         if cfg.compose_services:
             print(f"Services     : {', '.join(cfg.compose_services)}")
@@ -129,17 +144,29 @@ def _print_summary(cfg) -> None:
             print("Services     : all")
     print()
     print("Useful commands:")
-    compose_file = cfg.managed_compose_path if cfg.source_kind.value == "dockerfile" else cfg.source_compose_path
+    compose_files = [str(compose_file)]
+    if cfg.reverse_proxy_enabled:
+        compose_files.append(str(cfg.managed_proxy_compose_path))
+    compose_files_arg = " ".join(f"-f {path}" for path in compose_files)
     services = ""
     if cfg.compose_services and cfg.source_kind.value == "compose":
         services = " " + " ".join(quote(s) for s in cfg.compose_services)
     print(
         "  docker compose "
         f"-p {cfg.compose_project_name} "
-        f"-f {compose_file} ps{services}"
+        f"{compose_files_arg} ps{services}"
     )
     print(
         "  docker compose "
         f"-p {cfg.compose_project_name} "
-        f"-f {compose_file} logs -f{services}"
+        f"{compose_files_arg} logs -f{services}"
     )
+    if cfg.tls_enabled:
+        print(
+            "  docker compose "
+            f"-p {cfg.compose_project_name} "
+            f"{compose_files_arg} run --rm certbot renew && "
+            "docker compose "
+            f"-p {cfg.compose_project_name} "
+            f"{compose_files_arg} exec -T nginx nginx -s reload"
+        )
