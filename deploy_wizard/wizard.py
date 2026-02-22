@@ -98,6 +98,14 @@ def _default_route_path_segment(name: str) -> str:
     return token or "service"
 
 
+def _default_subdomain_label(name: str) -> str:
+    token = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
+    token = re.sub(r"-+", "-", token)
+    if not token:
+        return "service"
+    return token[:63].strip("-") or "service"
+
+
 def _format_route_spec(route) -> str:
     if route.path_prefix == "/":
         return f"{route.host}={route.upstream_host}:{route.upstream_port}"
@@ -127,6 +135,9 @@ def _build_compose_path_routes(
     routes: List[str] = []
     used_paths = set()
     for service in services:
+        upstream_port_raw = service_ports.get(service)
+        if upstream_port_raw is None:
+            continue
         base = f"/{_default_route_path_segment(service)}"
         path = base
         suffix = 2
@@ -134,8 +145,33 @@ def _build_compose_path_routes(
             path = f"{base}-{suffix}"
             suffix += 1
         used_paths.add(path)
-        upstream_port = int(service_ports.get(service, 80))
+        upstream_port = int(upstream_port_raw)
         route = parse_proxy_route(f"{host}{path}={service}:{upstream_port}")
+        routes.append(_format_route_spec(route))
+    return tuple(routes)
+
+
+def _build_compose_subdomain_routes(
+    *,
+    domain: str,
+    services: List[str],
+    service_ports: dict,
+) -> Tuple[str, ...]:
+    routes: List[str] = []
+    used_hosts = set()
+    for service in services:
+        upstream_port_raw = service_ports.get(service)
+        if upstream_port_raw is None:
+            continue
+        base = f"{_default_subdomain_label(service)}.{domain}".lower()
+        host = base
+        suffix = 2
+        while host in used_hosts:
+            host = f"{_default_subdomain_label(service)}-{suffix}.{domain}".lower()
+            suffix += 1
+        used_hosts.add(host)
+        upstream_port = int(upstream_port_raw)
+        route = parse_proxy_route(f"{host}={service}:{upstream_port}")
         routes.append(_format_route_spec(route))
     return tuple(routes)
 
@@ -474,31 +510,49 @@ def run_wizard() -> Config:
                 default_upstream = compose_services[0]
             elif discovered_services:
                 default_upstream = discovered_services[0]
-            default_upstream_port = int(discovered_service_ports.get(default_upstream, 80))
+            default_upstream_port = int(discovered_service_ports.get(default_upstream, 8080))
         default_host = domain or "_"
         default_path_prefix = "/"
         if source_kind == SourceKind.COMPOSE:
             selected_services = list(compose_services or discovered_services)
+            route_candidates = [
+                svc for svc in selected_services if svc in discovered_service_ports
+            ]
+            skipped = [svc for svc in selected_services if svc not in discovered_service_ports]
+            if skipped:
+                print(
+                    "Skipping route suggestions for services without detectable ports: "
+                    + ", ".join(skipped)
+                )
             if compose_services is None and discovered_published_ports:
-                selected_services = [
-                    svc
-                    for svc in discovered_services
-                    if svc in discovered_published_ports
+                published_subset = [
+                    svc for svc in route_candidates if svc in discovered_published_ports
                 ]
-                if selected_services:
+                if published_subset:
+                    route_candidates = published_subset
                     print(
                         "Routing suggestions limited to services with published host ports."
                     )
             if len(selected_services) > 1:
-                suggested_routes = _build_compose_path_routes(
-                    host=default_host,
-                    services=selected_services,
-                    service_ports=discovered_service_ports,
-                )
-                if suggested_routes:
-                    print(
-                        "Suggested default URLs (one path per selected service):"
+                suggested_routes: Tuple[str, ...] = tuple()
+                prompt = "Use these suggested /service routes?"
+                heading = "Suggested default URLs (one path per selected service):"
+                if domain is not None:
+                    suggested_routes = _build_compose_subdomain_routes(
+                        domain=domain,
+                        services=route_candidates,
+                        service_ports=discovered_service_ports,
                     )
+                    prompt = "Use these suggested subdomain routes?"
+                    heading = "Suggested default URLs (subdomain per service):"
+                else:
+                    suggested_routes = _build_compose_path_routes(
+                        host=default_host,
+                        services=route_candidates,
+                        service_ports=discovered_service_ports,
+                    )
+                if suggested_routes:
+                    print(heading)
                     for raw_route in suggested_routes:
                         parsed_route = parse_proxy_route(raw_route)
                         url_hint = _route_url_hint(
@@ -510,7 +564,7 @@ def run_wizard() -> Config:
                             f"  - {url_hint} -> "
                             f"{parsed_route.upstream_host}:{parsed_route.upstream_port}"
                         )
-                    if _confirm("Use these suggested /service routes?", default=True):
+                    if _confirm(prompt, default=True):
                         proxy_routes = suggested_routes
                 default_path_prefix = f"/{_default_route_path_segment(default_upstream)}"
         if proxy_routes is None:

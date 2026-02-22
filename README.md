@@ -74,7 +74,8 @@ Notes:
 - `--ingress-mode external-nginx` writes and reloads a host nginx site.
 - `--ingress-mode takeover` stops host nginx before reconfigure and starts it again.
 - Interactive mode auto-selects free proxy ports (prefers 80/443) and only falls back to manual entry if needed.
-- Interactive mode suggests default routes from selected compose services; when deploying all compose services, it only auto-suggests routes for services with published host `ports:`.
+- Interactive mode suggests default subdomain routes in TLS/domain mode (`service.example.com`) and path routes in token-only mode (`/service`).
+- Route suggestions skip services without detectable ports and, when deploying all compose services, prefer services with published host `ports:`.
 - For public TLS in interactive mode, the wizard requires host ports `80/443` by default and asks before switching to non-standard ports.
 
 TLS reverse proxy example:
