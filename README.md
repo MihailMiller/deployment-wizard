@@ -66,6 +66,47 @@ By default, deployment writes Docker daemon settings to improve pull reliability
 
 You can disable this behavior with `--no-docker-daemon-tuning`.
 
+## Troubleshooting: `Temporary failure in name resolution`
+
+If image pulls work but `pip install`/`apk add` fails inside build or run steps with DNS/network errors,
+the Docker host firewall may be blocking container egress (common with UFW forwarding defaults).
+
+Typical symptoms:
+- `Temporary failure in name resolution`
+- Alpine `apk` warnings fetching indexes, followed by package "no such package"
+
+Quick check:
+
+```bash
+docker run --rm alpine:3.20 sh -c \
+  "nslookup pypi.org && wget -S -O /dev/null https://pypi.org/simple/"
+```
+
+If this fails, apply host-side UFW + forwarding fixes (replace `eth0` with your uplink interface):
+
+```bash
+sudo ufw allow out 53/udp
+sudo ufw allow out 53/tcp
+sudo ufw allow out 443/tcp
+sudo ufw route allow in on docker0 out on eth0
+sudo sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo ufw reload
+sudo systemctl restart docker
+```
+
+If DNS resolution still fails inside containers, set Docker daemon DNS and rebuild:
+
+```bash
+sudo mkdir -p /etc/docker
+cat <<'EOF' | sudo tee /etc/docker/daemon.json
+{
+  "dns": ["1.1.1.1", "8.8.8.8"]
+}
+EOF
+sudo systemctl restart docker
+```
+
 ## Development
 
 Run tests:
