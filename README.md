@@ -60,7 +60,7 @@ Key flags:
 - `--registry-retries`
 - `--retry-backoff-seconds`
 - `--no-docker-daemon-tuning`
-- `--auth-token` (enable bearer-token auth at managed proxy)
+- `--auth-token` (enable proxy auth; accepts `Authorization: Bearer <token>` and browser Basic Auth)
 - `--domain` + `--certbot-email` (enable nginx + certbot)
 - `--proxy-http-port` + `--proxy-https-port` (external nginx bind ports)
 - `--proxy-route HOST[/PATH]=UPSTREAM:PORT` (repeat for multi-host/path routing)
@@ -74,6 +74,7 @@ Notes:
 - `--ingress-mode external-nginx` writes and reloads a host nginx site.
 - `--ingress-mode takeover` stops host nginx before reconfigure and starts it again.
 - In `external-nginx`/`takeover` mode for compose sources, proxy upstreams must be host-reachable (for example `127.0.0.1:8080`), not compose DNS names like `orchestrator`.
+- Browser access with `--auth-token`: enter username `token` and password `<your-token>` in the Basic Auth prompt.
 - Interactive mode auto-selects free proxy ports (prefers 80/443) and only falls back to manual entry if needed.
 - Interactive mode suggests default subdomain routes in TLS/domain mode (`service.example.com`) and path routes in token-only mode (`/service`).
 - Route suggestions skip services without detectable ports and, when deploying all compose services, prefer services with published host `ports:`.

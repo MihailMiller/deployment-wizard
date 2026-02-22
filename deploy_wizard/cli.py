@@ -100,7 +100,10 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
         "--auth-token",
         default=None,
         metavar="TOKEN",
-        help="Require Authorization: Bearer <token> at the managed nginx proxy.",
+        help=(
+            "Require proxy auth token. Supports Authorization: Bearer <token> "
+            "and browser Basic Auth (user token / password <token>)."
+        ),
     )
     parser.add_argument(
         "--proxy-upstream-service",

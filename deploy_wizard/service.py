@@ -4,6 +4,7 @@ Service deployment logic for compose-backed and Dockerfile-backed sources.
 
 from __future__ import annotations
 
+import base64
 import subprocess
 import socket
 import time
@@ -180,6 +181,25 @@ def _group_routes_by_host(routes) -> list:
     return [(host, grouped[host]) for host in order]
 
 
+def _render_auth_guard(auth_token: str | None) -> str:
+    if auth_token is None:
+        return ""
+    basic = base64.b64encode(f"token:{auth_token}".encode("utf-8")).decode("ascii")
+    return (
+        "        set $auth_ok 0;\n"
+        f'        if ($http_authorization = "Bearer {auth_token}") {{\n'
+        "            set $auth_ok 1;\n"
+        "        }\n"
+        f'        if ($http_authorization = "Basic {basic}") {{\n'
+        "            set $auth_ok 1;\n"
+        "        }\n"
+        "        if ($auth_ok != 1) {\n"
+        '            add_header WWW-Authenticate "Basic realm=\\"Protected\\"" always;\n'
+        "            return 401;\n"
+        "        }\n"
+    )
+
+
 def _render_route_locations(routes, auth_guard: str) -> str:
     blocks = []
     for route in routes:
@@ -296,13 +316,7 @@ def write_nginx_proxy_config(cfg: Config, *, https_enabled: bool) -> None:
         return
     routes = cfg.effective_proxy_routes
     cert_base_domain = cfg.domain or ""
-    auth_guard = ""
-    if cfg.auth_token is not None:
-        auth_guard = (
-            f'        if ($http_authorization != "Bearer {cfg.auth_token}") {{\n'
-            "            return 401;\n"
-            "        }\n"
-        )
+    auth_guard = _render_auth_guard(cfg.auth_token)
     grouped = _group_routes_by_host(routes)
     blocks = []
     if not cfg.tls_enabled:
@@ -413,13 +427,7 @@ def _reload_nginx(cfg: Config) -> None:
 def _render_host_nginx_config(cfg: Config, *, https_enabled: bool) -> str:
     routes = cfg.effective_proxy_routes
     grouped = _group_routes_by_host(routes)
-    auth_guard = ""
-    if cfg.auth_token is not None:
-        auth_guard = (
-            f'        if ($http_authorization != "Bearer {cfg.auth_token}") {{\n'
-            "            return 401;\n"
-            "        }\n"
-        )
+    auth_guard = _render_auth_guard(cfg.auth_token)
     if not cfg.tls_enabled:
         blocks = []
         for host, host_routes in grouped:

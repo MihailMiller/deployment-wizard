@@ -200,7 +200,9 @@ class DeployWizardServiceTests(unittest.TestCase):
             nginx_content = cfg.managed_nginx_conf_path.read_text(encoding="utf-8")
             self.assertIn('"0.0.0.0:80:80"', proxy_content)
             self.assertNotIn("certbot:", proxy_content)
-            self.assertIn('if ($http_authorization != "Bearer TokenABC123") {', nginx_content)
+            self.assertIn('if ($http_authorization = "Bearer TokenABC123") {', nginx_content)
+            self.assertIn('if ($http_authorization = "Basic dG9rZW46VG9rZW5BQkMxMjM=") {', nginx_content)
+            self.assertIn('add_header WWW-Authenticate "Basic realm=\\"Protected\\"" always;', nginx_content)
 
     def test_write_proxy_compose_with_custom_host_ports(self) -> None:
         with tempfile.TemporaryDirectory() as td:
