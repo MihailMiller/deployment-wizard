@@ -580,9 +580,6 @@ def _activate_host_nginx_site(cfg: Config, content: str) -> None:
 
 
 def _reload_or_start_host_nginx(cfg: Config) -> None:
-    if cfg.ingress_mode == IngressMode.TAKEOVER:
-        sh("systemctl start nginx")
-        return
     if sh("systemctl reload nginx", check=False) != 0:
         sh("systemctl start nginx")
 

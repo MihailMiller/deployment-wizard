@@ -7,6 +7,7 @@ from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind
 from deploy_wizard.service import (
     _issue_certificate,
     _issue_certificate_host,
+    _reload_or_start_host_nginx,
     _render_host_nginx_config,
     _run_with_retries,
     deploy_compose_source,
@@ -402,6 +403,32 @@ class DeployWizardServiceTests(unittest.TestCase):
             self.assertIn("--expand", cmd)
             self.assertIn("-d api.example.com", cmd)
             self.assertIn("-d wiki.example.com", cmd)
+
+    def test_reload_or_start_host_nginx_takeover_tries_reload_first(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                access_mode=AccessMode.PUBLIC,
+                ingress_mode=IngressMode.TAKEOVER,
+                proxy_routes=("wiki.example.com=127.0.0.1:8080",),
+            )
+            with mock.patch("deploy_wizard.service.sh", side_effect=[1, 0]) as sh_mock:
+                _reload_or_start_host_nginx(cfg)
+        sh_mock.assert_has_calls(
+            [
+                mock.call("systemctl reload nginx", check=False),
+                mock.call("systemctl start nginx"),
+            ]
+        )
 
     def test_render_host_nginx_config_external_tls_routes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
