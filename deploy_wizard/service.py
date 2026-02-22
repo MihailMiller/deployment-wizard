@@ -181,6 +181,16 @@ def _group_routes_by_host(routes) -> list:
     return [(host, grouped[host]) for host in order]
 
 
+def _tls_server_hosts(cfg: Config, routes) -> list:
+    hosts = []
+    if cfg.domain:
+        hosts.append(cfg.domain)
+    for route in routes:
+        if route.host not in hosts:
+            hosts.append(route.host)
+    return hosts
+
+
 def _render_auth_guard(auth_token: str | None) -> str:
     if auth_token is None:
         return ""
@@ -289,6 +299,23 @@ def _render_http_redirect_server(host: str, *, acme_root: str = "") -> str:
     return "".join(parts)
 
 
+def _render_http_acme_only_server(host: str, *, acme_root: str) -> str:
+    return (
+        "server {\n"
+        "    listen 80;\n"
+        f"    server_name {host};\n"
+        "\n"
+        "    location /.well-known/acme-challenge/ {\n"
+        f"        root {acme_root};\n"
+        "    }\n"
+        "\n"
+        "    location / {\n"
+        "        return 404;\n"
+        "    }\n"
+        "}\n"
+    )
+
+
 def _render_https_proxy_server(
     host: str,
     routes,
@@ -311,6 +338,30 @@ def _render_https_proxy_server(
     )
 
 
+def _render_https_fallback_server(
+    host: str,
+    auth_guard: str,
+    *,
+    cert_base_domain: str,
+) -> str:
+    return (
+        "server {\n"
+        "    listen 443 ssl;\n"
+        f"    server_name {host};\n"
+        "\n"
+        f"    ssl_certificate /etc/letsencrypt/live/{cert_base_domain}/fullchain.pem;\n"
+        f"    ssl_certificate_key /etc/letsencrypt/live/{cert_base_domain}/privkey.pem;\n"
+        "    ssl_protocols TLSv1.2 TLSv1.3;\n"
+        "    ssl_prefer_server_ciphers on;\n"
+        "\n"
+        "    location / {\n"
+        f"{auth_guard}"
+        "        return 404;\n"
+        "    }\n"
+        "}\n"
+    )
+
+
 def write_nginx_proxy_config(cfg: Config, *, https_enabled: bool) -> None:
     if not cfg.uses_managed_ingress:
         return
@@ -318,6 +369,7 @@ def write_nginx_proxy_config(cfg: Config, *, https_enabled: bool) -> None:
     cert_base_domain = cfg.domain or ""
     auth_guard = _render_auth_guard(cfg.auth_token)
     grouped = _group_routes_by_host(routes)
+    route_map = {host: host_routes for host, host_routes in grouped}
     blocks = []
     if not cfg.tls_enabled:
         for host, host_routes in grouped:
@@ -329,23 +381,42 @@ def write_nginx_proxy_config(cfg: Config, *, https_enabled: bool) -> None:
                 )
             )
     elif not https_enabled:
-        for host, host_routes in grouped:
+        for host in _tls_server_hosts(cfg, routes):
+            host_routes = route_map.get(host)
+            if host_routes:
+                blocks.append(
+                    _render_http_proxy_server(
+                        host,
+                        host_routes,
+                        auth_guard,
+                        acme_root="/var/www/certbot",
+                    )
+                )
+                continue
             blocks.append(
-                _render_http_proxy_server(
+                _render_http_acme_only_server(
                     host,
-                    host_routes,
-                    auth_guard,
                     acme_root="/var/www/certbot",
                 )
             )
     else:
-        for host, host_routes in grouped:
+        for host in _tls_server_hosts(cfg, routes):
             blocks.append(
                 _render_http_redirect_server(
                     host,
                     acme_root="/var/www/certbot",
                 )
             )
+            host_routes = route_map.get(host)
+            if not host_routes:
+                blocks.append(
+                    _render_https_fallback_server(
+                        host,
+                        auth_guard,
+                        cert_base_domain=cert_base_domain,
+                    )
+                )
+                continue
             blocks.append(
                 _render_https_proxy_server(
                     host,
@@ -428,6 +499,7 @@ def _reload_nginx(cfg: Config) -> None:
 def _render_host_nginx_config(cfg: Config, *, https_enabled: bool) -> str:
     routes = cfg.effective_proxy_routes
     grouped = _group_routes_by_host(routes)
+    route_map = {host: host_routes for host, host_routes in grouped}
     auth_guard = _render_auth_guard(cfg.auth_token)
     if not cfg.tls_enabled:
         blocks = []
@@ -445,24 +517,43 @@ def _render_host_nginx_config(cfg: Config, *, https_enabled: bool) -> str:
     cert_base = cfg.cert_domain_names[0] if cfg.cert_domain_names else (cfg.domain or "")
     blocks = []
     if not https_enabled:
-        for host, host_routes in grouped:
+        for host in _tls_server_hosts(cfg, routes):
+            host_routes = route_map.get(host)
+            if host_routes:
+                blocks.append(
+                    _render_http_proxy_server(
+                        host,
+                        host_routes,
+                        auth_guard,
+                        acme_root=str(webroot),
+                    )
+                )
+                continue
             blocks.append(
-                _render_http_proxy_server(
+                _render_http_acme_only_server(
                     host,
-                    host_routes,
-                    auth_guard,
                     acme_root=str(webroot),
                 )
             )
         return "\n".join(blocks) + "\n"
 
-    for host, host_routes in grouped:
+    for host in _tls_server_hosts(cfg, routes):
         blocks.append(
             _render_http_redirect_server(
                 host,
                 acme_root=str(webroot),
             )
         )
+        host_routes = route_map.get(host)
+        if not host_routes:
+            blocks.append(
+                _render_https_fallback_server(
+                    host,
+                    auth_guard,
+                    cert_base_domain=cert_base,
+                )
+            )
+            continue
         blocks.append(
             _render_https_proxy_server(
                 host,

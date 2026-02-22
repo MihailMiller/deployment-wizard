@@ -304,10 +304,12 @@ class DeployWizardServiceTests(unittest.TestCase):
             write_proxy_compose(cfg)
             write_nginx_proxy_config(cfg, https_enabled=True)
             nginx_content = cfg.managed_nginx_conf_path.read_text(encoding="utf-8")
+            self.assertIn("server_name api.example.com;", nginx_content)
             self.assertIn("server_name wiki.example.com;", nginx_content)
             self.assertIn("server_name mail.example.com;", nginx_content)
             self.assertIn("proxy_pass http://orchestrator:8090;", nginx_content)
             self.assertIn("proxy_pass http://mail:4000;", nginx_content)
+            self.assertIn("return 404;", nginx_content)
             self.assertIn(
                 "ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;",
                 nginx_content,
@@ -421,8 +423,10 @@ class DeployWizardServiceTests(unittest.TestCase):
                 proxy_routes=("wiki.example.com=127.0.0.1:8080",),
             )
             content = _render_host_nginx_config(cfg, https_enabled=True)
+            self.assertIn("server_name api.example.com;", content)
             self.assertIn("server_name wiki.example.com;", content)
             self.assertIn("proxy_pass http://127.0.0.1:8080;", content)
+            self.assertIn("return 404;", content)
             self.assertIn(
                 "ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;",
                 content,
