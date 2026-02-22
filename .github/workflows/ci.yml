@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile package
+        run: python -m compileall -q deploy_wizard
+
+      - name: AST parse modules
+        run: |
+          python - <<'EOF'
+          import ast, pathlib, sys
+          failed = []
+          for f in sorted(pathlib.Path("deploy_wizard").glob("*.py")):
+              try:
+                  ast.parse(f.read_text(encoding="utf-8"))
+              except SyntaxError as e:
+                  print(f"FAIL {f}: {e}", file=sys.stderr)
+                  failed.append(f)
+          if failed:
+              sys.exit(1)
+          print(f"AST OK - {len(list(pathlib.Path('deploy_wizard').glob('*.py')))} modules")
+          EOF
+
+      - name: Import package
+        run: |
+          python -c "
+          from deploy_wizard import (
+              cli, config, log, orchestrator, service, system, wizard
+          )
+          print('All imports OK')
+          "
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

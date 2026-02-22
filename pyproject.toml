@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "service-deployment-wizard"
+version = "0.3.0"
+description = "Generic Docker microservice deployment wizard for Ubuntu."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "service-deployment-wizard contributors" }]
+dependencies = []
+
+[tool.setuptools]
+packages = ["deploy_wizard"]
+
+[project.scripts]
+service-deploy = "deploy_wizard.cli:dispatch"

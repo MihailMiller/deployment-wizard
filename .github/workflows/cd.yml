@@ -1,0 +1,48 @@
+name: CD - Deploy to VM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: "Service name (Docker Compose project)"
+        required: true
+        type: string
+      source_dir:
+        description: "Absolute source directory on VM"
+        required: true
+        type: string
+      base_dir:
+        description: "Deployment base directory on VM"
+        required: false
+        default: "/opt/services"
+        type: string
+
+concurrency:
+  group: deploy-vm
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+
+    steps:
+      - name: Deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          port: ${{ secrets.VM_PORT }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            sudo python3 -m deploy_wizard deploy --batch \
+              --service-name "${{ inputs.service_name }}" \
+              --source-dir "${{ inputs.source_dir }}" \
+              --base-dir "${{ inputs.base_dir }}"
