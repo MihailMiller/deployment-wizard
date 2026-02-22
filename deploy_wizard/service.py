@@ -5,9 +5,11 @@ Service deployment logic for compose-backed and Dockerfile-backed sources.
 from __future__ import annotations
 
 import subprocess
+import socket
 import time
 from pathlib import Path
 from shlex import quote
+from typing import Tuple
 
 from deploy_wizard.config import AccessMode, Config, SourceKind
 from deploy_wizard.log import die, log_line, sh
@@ -52,6 +54,47 @@ def _resolve_bind_host(cfg: Config) -> str:
     return cfg.bind_host
 
 
+def _can_bind(bind_host: str, port: int) -> Tuple[bool, str]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((bind_host, port))
+        return True, ""
+    except OSError as exc:
+        return False, str(exc)
+    finally:
+        sock.close()
+
+
+def _suggest_port(bind_host: str, start: int) -> int:
+    for candidate in range(max(1024, start), min(start + 2000, 65535) + 1):
+        ok, _ = _can_bind(bind_host, candidate)
+        if ok:
+            return candidate
+    return 0
+
+
+def ensure_required_ports_available(cfg: Config) -> None:
+    checks = []
+    if cfg.reverse_proxy_enabled:
+        bind_host = _resolve_bind_host(cfg)
+        checks.append(("proxy HTTP", bind_host, cfg.effective_proxy_http_port, "--proxy-http-port"))
+        if cfg.tls_enabled:
+            checks.append(("proxy HTTPS", bind_host, cfg.effective_proxy_https_port, "--proxy-https-port"))
+    elif cfg.source_kind == SourceKind.DOCKERFILE and cfg.host_port is not None:
+        checks.append(("service host port", _resolve_bind_host(cfg), cfg.host_port, "--host-port"))
+
+    for label, bind_host, port, flag in checks:
+        ok, err = _can_bind(bind_host, int(port))
+        if ok:
+            continue
+        suggestion = _suggest_port(bind_host, 8080 if int(port) < 1024 else int(port) + 1)
+        hint = f" Try {flag} {suggestion}." if suggestion else ""
+        die(
+            f"{label} {bind_host}:{port} is unavailable ({err}).{hint}"
+        )
+
+
 def write_generated_compose(cfg: Config) -> None:
     ports_block = ""
     if cfg.host_port is not None and cfg.container_port is not None:
@@ -84,9 +127,9 @@ def write_proxy_compose(cfg: Config) -> None:
     if cfg.tls_enabled:
         acme_dir.mkdir(parents=True, exist_ok=True)
         letsencrypt_dir.mkdir(parents=True, exist_ok=True)
-    ports = [f'      - "{bind_host}:80:80"\n']
+    ports = [f'      - "{bind_host}:{cfg.effective_proxy_http_port}:80"\n']
     if cfg.tls_enabled:
-        ports.append(f'      - "{bind_host}:443:443"\n')
+        ports.append(f'      - "{bind_host}:{cfg.effective_proxy_https_port}:443"\n')
     volumes = [f'      - "{nginx_conf}:/etc/nginx/conf.d/default.conf:ro"\n']
     if cfg.tls_enabled:
         volumes.extend(

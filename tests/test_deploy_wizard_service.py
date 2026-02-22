@@ -8,6 +8,7 @@ from deploy_wizard.service import (
     _run_with_retries,
     deploy_compose_source,
     deploy_dockerfile_source,
+    ensure_required_ports_available,
     write_generated_compose,
     write_nginx_proxy_config,
     write_proxy_compose,
@@ -171,6 +172,52 @@ class DeployWizardServiceTests(unittest.TestCase):
             self.assertIn('"0.0.0.0:80:80"', proxy_content)
             self.assertNotIn("certbot:", proxy_content)
             self.assertIn('if ($http_authorization != "Bearer TokenABC123") {', nginx_content)
+
+    def test_write_proxy_compose_with_custom_host_ports(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src"
+            src.mkdir(parents=True, exist_ok=True)
+            (src / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.DOCKERFILE,
+                base_dir=Path(td) / "services",
+                container_port=8080,
+                host_port=18080,
+                access_mode=AccessMode.PUBLIC,
+                domain="api.example.com",
+                certbot_email="ops@example.com",
+                proxy_http_port=8088,
+                proxy_https_port=8443,
+            )
+            write_generated_compose(cfg)
+            write_proxy_compose(cfg)
+            proxy_content = cfg.managed_proxy_compose_path.read_text(encoding="utf-8")
+            self.assertIn('"0.0.0.0:8088:80"', proxy_content)
+            self.assertIn('"0.0.0.0:8443:443"', proxy_content)
+
+    def test_ensure_required_ports_available_provides_suggestion(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src"
+            src.mkdir(parents=True, exist_ok=True)
+            (src / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.DOCKERFILE,
+                container_port=8080,
+                host_port=18080,
+                access_mode=AccessMode.PUBLIC,
+                auth_token="TokenABC123",
+            )
+            with mock.patch("deploy_wizard.service._can_bind", return_value=(False, "Address already in use")), \
+                 mock.patch("deploy_wizard.service._suggest_port", return_value=8088), \
+                 mock.patch("deploy_wizard.service.die", side_effect=RuntimeError("die")) as die_mock:
+                with self.assertRaises(RuntimeError):
+                    ensure_required_ports_available(cfg)
+            msg = die_mock.call_args[0][0]
+            self.assertIn("--proxy-http-port 8088", msg)
 
     def test_deploy_dockerfile_source_with_tls_runs_certbot_and_reload(self) -> None:
         with tempfile.TemporaryDirectory() as td:

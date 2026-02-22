@@ -4,6 +4,7 @@ Interactive wizard for generic service deployment.
 
 from __future__ import annotations
 
+import socket
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -70,6 +71,47 @@ def _choose_access_mode() -> AccessMode:
     ]
     idx = _choose(options, default=1)
     return AccessMode(options[idx - 1][0])
+
+
+def _port_available(bind_host: str, port: int) -> Tuple[bool, str]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((bind_host, port))
+        return True, ""
+    except OSError as exc:
+        return False, str(exc)
+    finally:
+        sock.close()
+
+
+def _suggest_port(bind_host: str, start: int) -> Optional[int]:
+    presets = [8080, 8081, 8088, 8888, 9000, 9443]
+    for candidate in presets:
+        if candidate < start:
+            continue
+        ok, _ = _port_available(bind_host, candidate)
+        if ok:
+            return candidate
+    upper = min(start + 500, 65535)
+    for candidate in range(max(1024, start), upper + 1):
+        ok, _ = _port_available(bind_host, candidate)
+        if ok:
+            return candidate
+    return None
+
+
+def _pick_open_port(label: str, bind_host: str, default: int) -> int:
+    while True:
+        port = _prompt_int(label, default)
+        ok, err = _port_available(bind_host, port)
+        if ok:
+            return port
+        print(f"Port {bind_host}:{port} is unavailable: {err}")
+        suggestion = _suggest_port(bind_host, 8080 if port < 1024 else port + 1)
+        if suggestion is not None and _confirm(f"Use suggested port {suggestion}?", default=True):
+            return suggestion
+        print("Choose another port.")
 
 
 def _choose_services(services: List[str]) -> Optional[Tuple[str, ...]]:
@@ -158,6 +200,8 @@ def run_wizard() -> Config:
     auth_token: Optional[str] = None
     proxy_upstream_service: Optional[str] = None
     proxy_upstream_port: Optional[int] = None
+    proxy_http_port: Optional[int] = None
+    proxy_https_port: Optional[int] = None
 
     print("Access mode:")
     access_mode = _choose_access_mode()
@@ -202,6 +246,15 @@ def run_wizard() -> Config:
 
     proxy_enabled = domain is not None or auth_token is not None
     if proxy_enabled:
+        proxy_bind_host = "0.0.0.0" if access_mode == AccessMode.PUBLIC else "127.0.0.1"
+        proxy_http_port = _pick_open_port("Proxy HTTP host port", proxy_bind_host, 80)
+        if domain is not None:
+            proxy_https_port = _pick_open_port("Proxy HTTPS host port", proxy_bind_host, 443)
+            if proxy_http_port != 80:
+                print(
+                    "Warning: Let's Encrypt HTTP-01 normally requires external port 80. "
+                    "Use host/network forwarding from :80 to this selected proxy HTTP port."
+                )
         if source_kind == SourceKind.COMPOSE:
             default_service = ""
             if compose_services:
@@ -230,6 +283,8 @@ def run_wizard() -> Config:
         domain=domain,
         certbot_email=certbot_email,
         auth_token=auth_token,
+        proxy_http_port=proxy_http_port,
+        proxy_https_port=proxy_https_port,
         proxy_upstream_service=proxy_upstream_service,
         proxy_upstream_port=proxy_upstream_port,
     )
@@ -256,10 +311,15 @@ def run_wizard() -> Config:
         print(f"  Domain       : {cfg.domain}")
         print(f"  TLS email    : {cfg.certbot_email}")
         print(
+            f"  Proxy ports  : "
+            f"{cfg.effective_proxy_http_port}->{cfg.effective_proxy_https_port}"
+        )
+        print(
             f"  Proxy target : "
             f"{cfg.effective_proxy_upstream_service}:{cfg.effective_proxy_upstream_port}"
         )
     elif cfg.reverse_proxy_enabled:
+        print(f"  Proxy port   : {cfg.effective_proxy_http_port}")
         print(
             f"  Proxy target : "
             f"{cfg.effective_proxy_upstream_service}:{cfg.effective_proxy_upstream_port}"

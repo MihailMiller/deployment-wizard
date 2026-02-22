@@ -187,6 +187,22 @@ class DeployWizardConfigTests(unittest.TestCase):
             )
             self.assertTrue(cfg.reverse_proxy_enabled)
             self.assertEqual(cfg.effective_proxy_upstream_port, 8080)
+            self.assertEqual(cfg.effective_proxy_http_port, 80)
+
+    def test_proxy_https_port_requires_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.DOCKERFILE,
+                    container_port=8080,
+                    host_port=18080,
+                    auth_token="TokenABC123",
+                    proxy_https_port=8443,
+                )
 
     def test_compose_public_mode_requires_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -86,12 +86,18 @@ class DeployWizardCliTests(unittest.TestCase):
                     "api",
                     "--proxy-upstream-port",
                     "8080",
+                    "--proxy-http-port",
+                    "8088",
+                    "--proxy-https-port",
+                    "8443",
                 ]
             )
             self.assertEqual(cfg.domain, "api.example.com")
             self.assertEqual(cfg.certbot_email, "ops@example.com")
             self.assertEqual(cfg.effective_proxy_upstream_service, "api")
             self.assertEqual(cfg.effective_proxy_upstream_port, 8080)
+            self.assertEqual(cfg.effective_proxy_http_port, 8088)
+            self.assertEqual(cfg.effective_proxy_https_port, 8443)
 
     def test_build_config_with_auth_token_and_access_mode(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -136,6 +142,8 @@ class DeployWizardCliTests(unittest.TestCase):
         self.assertIn("--certbot-email", proc.stdout)
         self.assertIn("--auth-token", proc.stdout)
         self.assertIn("--access-mode", proc.stdout)
+        self.assertIn("--proxy-http-port", proc.stdout)
+        self.assertIn("--proxy-https-port", proc.stdout)
 
 
 if __name__ == "__main__":

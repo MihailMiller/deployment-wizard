@@ -124,6 +124,8 @@ class Config:
     domain: Optional[str] = None
     certbot_email: Optional[str] = None
     auth_token: Optional[str] = None
+    proxy_http_port: Optional[int] = None
+    proxy_https_port: Optional[int] = None
     proxy_upstream_service: Optional[str] = None
     proxy_upstream_port: Optional[int] = None
 
@@ -221,6 +223,14 @@ class Config:
             1 <= int(self.proxy_upstream_port) <= 65535
         ):
             raise ValueError("proxy_upstream_port must be between 1 and 65535.")
+        if self.proxy_http_port is not None and not (
+            1 <= int(self.proxy_http_port) <= 65535
+        ):
+            raise ValueError("proxy_http_port must be between 1 and 65535.")
+        if self.proxy_https_port is not None and not (
+            1 <= int(self.proxy_https_port) <= 65535
+        ):
+            raise ValueError("proxy_https_port must be between 1 and 65535.")
 
         if self.auth_token is not None and not _TOKEN_RE.fullmatch(self.auth_token):
             raise ValueError(
@@ -252,6 +262,8 @@ class Config:
                 raise ValueError("certbot_email requires domain.")
 
         if self.reverse_proxy_enabled:
+            if not self.tls_enabled and self.proxy_https_port is not None:
+                raise ValueError("proxy_https_port requires domain/certbot mode.")
             if resolved_kind == SourceKind.DOCKERFILE and self.proxy_upstream_service:
                 raise ValueError(
                     "proxy_upstream_service is only supported for compose sources."
@@ -279,9 +291,14 @@ class Config:
                     )
             _ = self.effective_proxy_upstream_service
             _ = self.effective_proxy_upstream_port
+            _ = self.effective_proxy_http_port
+            if self.tls_enabled:
+                _ = self.effective_proxy_https_port
         else:
             if (
                 self.auth_token is not None
+                or self.proxy_http_port is not None
+                or self.proxy_https_port is not None
                 or self.proxy_upstream_service is not None
                 or self.proxy_upstream_port is not None
             ):
@@ -370,3 +387,19 @@ class Config:
             "Proxy mode requires proxy_upstream_port "
             "(or container_port for dockerfile sources)."
         )
+
+    @property
+    def effective_proxy_http_port(self) -> int:
+        if not self.reverse_proxy_enabled:
+            raise ValueError("No HTTP proxy port without proxy mode.")
+        if self.proxy_http_port is not None:
+            return int(self.proxy_http_port)
+        return 80
+
+    @property
+    def effective_proxy_https_port(self) -> int:
+        if not self.tls_enabled:
+            raise ValueError("No HTTPS proxy port without TLS mode.")
+        if self.proxy_https_port is not None:
+            return int(self.proxy_https_port)
+        return 443

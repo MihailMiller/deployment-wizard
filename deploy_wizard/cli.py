@@ -114,6 +114,20 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
             "Required in proxy mode unless --container-port is set."
         ),
     )
+    parser.add_argument(
+        "--proxy-http-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="External host HTTP port for managed nginx proxy. (default: 80)",
+    )
+    parser.add_argument(
+        "--proxy-https-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="External host HTTPS port for managed nginx proxy TLS. (default: 443)",
+    )
 
     raw = parser.parse_args(argv)
     try:
@@ -133,6 +147,8 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
             domain=raw.domain,
             certbot_email=raw.certbot_email,
             auth_token=raw.auth_token,
+            proxy_http_port=raw.proxy_http_port,
+            proxy_https_port=raw.proxy_https_port,
             proxy_upstream_service=raw.proxy_upstream_service,
             proxy_upstream_port=raw.proxy_upstream_port,
         )

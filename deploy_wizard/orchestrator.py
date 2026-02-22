@@ -71,7 +71,7 @@ def run_steps(steps: List[Step], bar: Any) -> None:
 
 
 def run_deploy(cfg) -> None:
-    from deploy_wizard.service import deploy_service
+    from deploy_wizard.service import deploy_service, ensure_required_ports_available
     from deploy_wizard.system import (
         detect_ubuntu,
         ensure_base_packages,
@@ -97,6 +97,7 @@ def run_deploy(cfg) -> None:
                 ensure_docker_daemon_tuning,
                 skip_if=lambda: not cfg.tune_docker_daemon,
             ),
+            Step("Check required host ports", lambda: ensure_required_ports_available(cfg)),
             Step("Deploy service", lambda: deploy_service(cfg)),
         ]
         with tqdm(total=len(steps), desc="Deploying service", unit="step") as bar:
@@ -126,6 +127,13 @@ def _print_summary(cfg) -> None:
     print(f"Compose file : {compose_file}")
     if cfg.reverse_proxy_enabled:
         print(f"Proxy file   : {cfg.managed_proxy_compose_path}")
+        if cfg.tls_enabled:
+            print(
+                f"Proxy ports  : "
+                f"{cfg.effective_proxy_http_port}->{cfg.effective_proxy_https_port}"
+            )
+        else:
+            print(f"Proxy port   : {cfg.effective_proxy_http_port}")
     if cfg.tls_enabled:
         print(f"Domain       : {cfg.domain}")
     if cfg.auth_token is not None:

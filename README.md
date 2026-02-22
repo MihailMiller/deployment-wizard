@@ -61,12 +61,14 @@ Key flags:
 - `--no-docker-daemon-tuning`
 - `--auth-token` (enable bearer-token auth at managed proxy)
 - `--domain` + `--certbot-email` (enable nginx + certbot)
+- `--proxy-http-port` + `--proxy-https-port` (external nginx bind ports)
 - `--proxy-upstream-service` (compose sources)
 - `--proxy-upstream-port`
 
 Notes:
 - For compose sources, `--access-mode` values other than `localhost` require managed proxy mode (`--domain` or `--auth-token`).
 - `--domain` (Let's Encrypt HTTP-01) requires `--access-mode public`.
+- Interactive mode proactively checks proxy host port availability and suggests alternatives.
 
 TLS reverse proxy example:
 
