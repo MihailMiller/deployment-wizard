@@ -7,6 +7,7 @@ from deploy_wizard.config import (
     Config,
     IngressMode,
     SourceKind,
+    list_compose_service_host_ports,
     list_compose_service_ports,
     list_compose_services,
 )
@@ -111,6 +112,13 @@ class DeployWizardConfigTests(unittest.TestCase):
             )
             self.assertEqual(
                 list_compose_service_ports(compose, include_expose=False),
+                {
+                    "workflow-studio": 8000,
+                    "orchestrator": 8080,
+                },
+            )
+            self.assertEqual(
+                list_compose_service_host_ports(compose),
                 {
                     "workflow-studio": 8000,
                     "orchestrator": 8080,
@@ -524,6 +532,26 @@ class DeployWizardConfigTests(unittest.TestCase):
             route = cfg.effective_proxy_routes[0]
             self.assertEqual(route.upstream_host, "127.0.0.1")
             self.assertEqual(route.upstream_port, 18080)
+
+    def test_external_nginx_compose_rejects_service_name_upstream_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.COMPOSE,
+                    access_mode=AccessMode.PUBLIC,
+                    ingress_mode=IngressMode.EXTERNAL_NGINX,
+                    auth_token="TokenABC123",
+                    proxy_routes=("api.example.com=orchestrator:8080",),
+                )
 
 
 if __name__ == "__main__":

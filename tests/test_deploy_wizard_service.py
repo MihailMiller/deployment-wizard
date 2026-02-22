@@ -141,7 +141,7 @@ class DeployWizardServiceTests(unittest.TestCase):
                 access_mode=AccessMode.PUBLIC,
                 ingress_mode=IngressMode.EXTERNAL_NGINX,
                 auth_token="TokenABC123",
-                proxy_routes=("wiki.example.com=orchestrator:8090",),
+                proxy_routes=("wiki.example.com=127.0.0.1:8080",),
             )
             with mock.patch("deploy_wizard.service._run_with_retries", return_value=True) as run_mock, \
                  mock.patch("deploy_wizard.service._configure_host_nginx_ingress") as host_mock:
@@ -385,11 +385,11 @@ class DeployWizardServiceTests(unittest.TestCase):
                 ingress_mode=IngressMode.EXTERNAL_NGINX,
                 domain="api.example.com",
                 certbot_email="ops@example.com",
-                proxy_routes=("wiki.example.com=orchestrator:8090",),
+                proxy_routes=("wiki.example.com=127.0.0.1:8080",),
             )
             content = _render_host_nginx_config(cfg, https_enabled=True)
             self.assertIn("server_name wiki.example.com;", content)
-            self.assertIn("proxy_pass http://orchestrator:8090;", content)
+            self.assertIn("proxy_pass http://127.0.0.1:8080;", content)
             self.assertIn(
                 "ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;",
                 content,
@@ -415,18 +415,18 @@ class DeployWizardServiceTests(unittest.TestCase):
                 domain="apps.example.com",
                 certbot_email="ops@example.com",
                 proxy_routes=(
-                    "apps.example.com/workflow-studio=workflow-studio:8000",
-                    "apps.example.com/orchestrator=orchestrator:8080",
+                    "apps.example.com/workflow-studio=127.0.0.1:8000",
+                    "apps.example.com/orchestrator=127.0.0.1:8080",
                 ),
             )
             content = _render_host_nginx_config(cfg, https_enabled=True)
             self.assertIn("server_name apps.example.com;", content)
             self.assertIn("location = /workflow-studio {", content)
             self.assertIn("location ^~ /workflow-studio/ {", content)
-            self.assertIn("proxy_pass http://workflow-studio:8000/;", content)
+            self.assertIn("proxy_pass http://127.0.0.1:8000/;", content)
             self.assertIn("location = /orchestrator {", content)
             self.assertIn("location ^~ /orchestrator/ {", content)
-            self.assertIn("proxy_pass http://orchestrator:8080/;", content)
+            self.assertIn("proxy_pass http://127.0.0.1:8080/;", content)
 
 
 if __name__ == "__main__":

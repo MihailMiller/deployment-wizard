@@ -4,6 +4,7 @@ from deploy_wizard.config import parse_proxy_route
 from deploy_wizard.wizard import (
     _build_compose_path_routes,
     _build_compose_subdomain_routes,
+    _build_compose_subdomain_host_routes,
 )
 
 
@@ -53,6 +54,24 @@ class DeployWizardWizardTests(unittest.TestCase):
         parsed = [parse_proxy_route(item) for item in routes]
         self.assertEqual(parsed[0].host, "my-service.example.org")
         self.assertEqual(parsed[1].host, "my-service-2.example.org")
+
+    def test_build_compose_subdomain_host_routes_uses_localhost_upstreams(self) -> None:
+        routes = _build_compose_subdomain_host_routes(
+            domain="example.org",
+            services=["orchestrator", "workflow-studio", "mongo"],
+            host_ports={
+                "orchestrator": 8080,
+                "workflow-studio": 8000,
+            },
+        )
+        parsed = [parse_proxy_route(item) for item in routes]
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0].host, "orchestrator.example.org")
+        self.assertEqual(parsed[0].upstream_host, "127.0.0.1")
+        self.assertEqual(parsed[0].upstream_port, 8080)
+        self.assertEqual(parsed[1].host, "workflow-studio.example.org")
+        self.assertEqual(parsed[1].upstream_host, "127.0.0.1")
+        self.assertEqual(parsed[1].upstream_port, 8000)
 
 
 if __name__ == "__main__":

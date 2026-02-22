@@ -182,18 +182,36 @@ def list_compose_services(compose_path: Path) -> List[str]:
     return names
 
 
-def _extract_container_port(token: str) -> Optional[int]:
+def _parse_port_mapping(token: str) -> Tuple[Optional[int], Optional[int]]:
     text = str(token).strip().strip("'").strip('"')
     if not text:
-        return None
+        return None, None
     text = text.split("/", 1)[0].strip()
-    match = re.search(r"(\d+)\s*$", text)
-    if match is None:
+    parts = [part.strip() for part in text.split(":")]
+
+    def _to_port(raw: str) -> Optional[int]:
+        if not raw or not raw.isdigit():
+            return None
+        value = int(raw)
+        if 1 <= value <= 65535:
+            return value
         return None
-    value = int(match.group(1))
-    if 1 <= value <= 65535:
-        return value
-    return None
+
+    if len(parts) == 1:
+        return None, _to_port(parts[0])
+    if len(parts) == 2:
+        return _to_port(parts[0]), _to_port(parts[1])
+    return _to_port(parts[-2]), _to_port(parts[-1])
+
+
+def _extract_container_port(token: str) -> Optional[int]:
+    _host_port, container_port = _parse_port_mapping(token)
+    return container_port
+
+
+def _extract_host_port(token: str) -> Optional[int]:
+    host_port, _container_port = _parse_port_mapping(token)
+    return host_port
 
 
 def list_compose_service_ports(
@@ -285,6 +303,90 @@ def list_compose_service_ports(
             if current_service in ports:
                 continue
             parsed_port = _extract_container_port(item_match.group(2))
+            if parsed_port is not None:
+                ports[current_service] = parsed_port
+
+    return ports
+
+
+def list_compose_service_host_ports(compose_path: Path) -> dict:
+    """
+    Best-effort parser for first published host port per compose service.
+    Reads only `ports:` entries and ignores `expose:`.
+    """
+    if not compose_path.exists() or not compose_path.is_file():
+        return {}
+
+    key_pattern = re.compile(
+        r'^(\s*)(?:'
+        r'"([^"]+)"|'
+        r"'([^']+)'|"
+        r"([A-Za-z0-9_.-]+)"
+        r')\s*:\s*(?:$|#)'
+    )
+    item_pattern = re.compile(r'^\s*-\s*("?)([^"]+)\1\s*(?:#.*)?$')
+    ports = {}
+    services_indent: Optional[int] = None
+    service_indent: Optional[int] = None
+    current_service: Optional[str] = None
+    current_service_indent: Optional[int] = None
+    section: Optional[str] = None
+    section_indent: Optional[int] = None
+
+    lines = compose_path.read_text(encoding="utf-8").splitlines()
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+
+        if services_indent is None:
+            services_match = re.match(r"^(\s*)services\s*:\s*(?:$|#)", line)
+            if services_match is not None:
+                services_indent = len(services_match.group(1))
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent <= services_indent:
+            break
+
+        key_match = key_pattern.match(raw_line)
+        if key_match is not None:
+            key_indent = len(key_match.group(1))
+            name = key_match.group(2) or key_match.group(3) or key_match.group(4) or ""
+            if service_indent is None and name:
+                service_indent = key_indent
+            if name and service_indent is not None and key_indent == service_indent:
+                current_service = name
+                current_service_indent = key_indent
+                section = None
+                section_indent = None
+                continue
+
+        if current_service is None or current_service_indent is None:
+            continue
+        if indent <= current_service_indent:
+            current_service = None
+            section = None
+            section_indent = None
+            continue
+
+        section_match = re.match(r"^\s*ports\s*:\s*(?:$|#)", raw_line)
+        if section_match is not None:
+            section = "ports"
+            section_indent = indent
+            continue
+
+        if section is not None and section_indent is not None and indent <= section_indent:
+            section = None
+            section_indent = None
+
+        if section == "ports" and section_indent is not None and indent > section_indent:
+            item_match = item_pattern.match(raw_line)
+            if item_match is None:
+                continue
+            if current_service in ports:
+                continue
+            parsed_port = _extract_host_port(item_match.group(2))
             if parsed_port is not None:
                 ports[current_service] = parsed_port
 
@@ -538,6 +640,17 @@ class Config:
                         raise ValueError(
                             f"proxy_route upstream '{route.upstream_host}' must be "
                             "included in compose_services."
+                        )
+                    if (
+                        resolved_kind == SourceKind.COMPOSE
+                        and self.ingress_mode != IngressMode.MANAGED
+                        and known_services
+                        and route.upstream_host in known_services
+                    ):
+                        raise ValueError(
+                            "external-nginx/takeover cannot use compose service names as "
+                            f"upstreams ('{route.upstream_host}'). Use a host-reachable "
+                            "upstream like 127.0.0.1:<published-port>."
                         )
             _ = self.effective_proxy_upstream_service
             _ = self.effective_proxy_upstream_port

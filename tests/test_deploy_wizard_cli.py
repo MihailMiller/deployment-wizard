@@ -154,7 +154,7 @@ class DeployWizardCliTests(unittest.TestCase):
                     "--auth-token",
                     "TokenABC123",
                     "--proxy-route",
-                    "wiki.example.com=orchestrator:8090",
+                    "wiki.example.com=127.0.0.1:8080",
                 ]
             )
             self.assertEqual(cfg.ingress_mode.value, "external-nginx")

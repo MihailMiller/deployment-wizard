@@ -18,6 +18,7 @@ from deploy_wizard.config import (
     SourceKind,
     detect_source_kind,
     find_compose_file,
+    list_compose_service_host_ports,
     list_compose_service_ports,
     list_compose_services,
 )
@@ -172,6 +173,30 @@ def _build_compose_subdomain_routes(
         used_hosts.add(host)
         upstream_port = int(upstream_port_raw)
         route = parse_proxy_route(f"{host}={service}:{upstream_port}")
+        routes.append(_format_route_spec(route))
+    return tuple(routes)
+
+
+def _build_compose_subdomain_host_routes(
+    *,
+    domain: str,
+    services: List[str],
+    host_ports: dict,
+) -> Tuple[str, ...]:
+    routes: List[str] = []
+    used_hosts = set()
+    for service in services:
+        upstream_port_raw = host_ports.get(service)
+        if upstream_port_raw is None:
+            continue
+        base = f"{_default_subdomain_label(service)}.{domain}".lower()
+        host = base
+        suffix = 2
+        while host in used_hosts:
+            host = f"{_default_subdomain_label(service)}-{suffix}.{domain}".lower()
+            suffix += 1
+        used_hosts.add(host)
+        route = parse_proxy_route(f"{host}=127.0.0.1:{int(upstream_port_raw)}")
         routes.append(_format_route_spec(route))
     return tuple(routes)
 
@@ -380,6 +405,7 @@ def run_wizard() -> Config:
     discovered_services: List[str] = []
     discovered_service_ports = {}
     discovered_published_ports = {}
+    discovered_host_ports = {}
     domain: Optional[str] = None
     certbot_email: Optional[str] = None
     auth_token: Optional[str] = None
@@ -401,6 +427,7 @@ def run_wizard() -> Config:
                 compose_path,
                 include_expose=False,
             )
+            discovered_host_ports = list_compose_service_host_ports(compose_path)
             if discovered_services:
                 compose_services = _choose_services(discovered_services)
 
@@ -506,25 +533,48 @@ def run_wizard() -> Config:
         default_upstream = _default_service_key(service_name)
         default_upstream_port = container_port or 8080
         if source_kind == SourceKind.COMPOSE:
+            selected_default_service = None
             if compose_services:
-                default_upstream = compose_services[0]
+                selected_default_service = compose_services[0]
             elif discovered_services:
-                default_upstream = discovered_services[0]
-            default_upstream_port = int(discovered_service_ports.get(default_upstream, 8080))
+                selected_default_service = discovered_services[0]
+            if selected_default_service is not None:
+                default_upstream = selected_default_service
+            if ingress_mode == IngressMode.MANAGED:
+                default_upstream_port = int(discovered_service_ports.get(default_upstream, 8080))
+            else:
+                default_upstream = "127.0.0.1"
+                if selected_default_service is not None:
+                    default_upstream_port = int(
+                        discovered_host_ports.get(selected_default_service, 8080)
+                    )
+                else:
+                    default_upstream_port = 8080
         default_host = domain or "_"
         default_path_prefix = "/"
         if source_kind == SourceKind.COMPOSE:
             selected_services = list(compose_services or discovered_services)
-            route_candidates = [
-                svc for svc in selected_services if svc in discovered_service_ports
-            ]
+            if ingress_mode == IngressMode.MANAGED:
+                route_candidates = [
+                    svc for svc in selected_services if svc in discovered_service_ports
+                ]
+            else:
+                route_candidates = [
+                    svc for svc in selected_services if svc in discovered_host_ports
+                ]
             skipped = [svc for svc in selected_services if svc not in discovered_service_ports]
+            if ingress_mode != IngressMode.MANAGED:
+                skipped = [svc for svc in selected_services if svc not in discovered_host_ports]
             if skipped:
                 print(
-                    "Skipping route suggestions for services without detectable ports: "
+                    "Skipping route suggestions for services without host-reachable ports: "
                     + ", ".join(skipped)
                 )
-            if compose_services is None and discovered_published_ports:
+            if (
+                ingress_mode == IngressMode.MANAGED
+                and compose_services is None
+                and discovered_published_ports
+            ):
                 published_subset = [
                     svc for svc in route_candidates if svc in discovered_published_ports
                 ]
@@ -538,19 +588,27 @@ def run_wizard() -> Config:
                 prompt = "Use these suggested /service routes?"
                 heading = "Suggested default URLs (one path per selected service):"
                 if domain is not None:
-                    suggested_routes = _build_compose_subdomain_routes(
-                        domain=domain,
-                        services=route_candidates,
-                        service_ports=discovered_service_ports,
-                    )
+                    if ingress_mode == IngressMode.MANAGED:
+                        suggested_routes = _build_compose_subdomain_routes(
+                            domain=domain,
+                            services=route_candidates,
+                            service_ports=discovered_service_ports,
+                        )
+                    else:
+                        suggested_routes = _build_compose_subdomain_host_routes(
+                            domain=domain,
+                            services=route_candidates,
+                            host_ports=discovered_host_ports,
+                        )
                     prompt = "Use these suggested subdomain routes?"
                     heading = "Suggested default URLs (subdomain per service):"
                 else:
-                    suggested_routes = _build_compose_path_routes(
-                        host=default_host,
-                        services=route_candidates,
-                        service_ports=discovered_service_ports,
-                    )
+                    if ingress_mode == IngressMode.MANAGED:
+                        suggested_routes = _build_compose_path_routes(
+                            host=default_host,
+                            services=route_candidates,
+                            service_ports=discovered_service_ports,
+                        )
                 if suggested_routes:
                     print(heading)
                     for raw_route in suggested_routes:
@@ -566,7 +624,8 @@ def run_wizard() -> Config:
                         )
                     if _confirm(prompt, default=True):
                         proxy_routes = suggested_routes
-                default_path_prefix = f"/{_default_route_path_segment(default_upstream)}"
+                if ingress_mode == IngressMode.MANAGED:
+                    default_path_prefix = f"/{_default_route_path_segment(default_upstream)}"
         if proxy_routes is None:
             proxy_routes = _pick_proxy_routes(
                 default_host=default_host,
