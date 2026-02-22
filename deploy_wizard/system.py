@@ -74,6 +74,13 @@ def ensure_base_packages() -> None:
     )
 
 
+def ensure_nginx_and_certbot() -> None:
+    sh(
+        "export DEBIAN_FRONTEND=noninteractive; "
+        "apt-get install -y nginx certbot"
+    )
+
+
 def ensure_docker() -> None:
     if shutil.which("docker"):
         rc = subprocess.run(

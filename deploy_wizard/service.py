@@ -11,7 +11,7 @@ from pathlib import Path
 from shlex import quote
 from typing import Tuple
 
-from deploy_wizard.config import AccessMode, Config, SourceKind
+from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind
 from deploy_wizard.log import die, log_line, sh
 
 
@@ -76,11 +76,19 @@ def _suggest_port(bind_host: str, start: int) -> int:
 
 def ensure_required_ports_available(cfg: Config) -> None:
     checks = []
-    if cfg.reverse_proxy_enabled:
+    if cfg.uses_managed_ingress:
         bind_host = _resolve_bind_host(cfg)
         checks.append(("proxy HTTP", bind_host, cfg.effective_proxy_http_port, "--proxy-http-port"))
         if cfg.tls_enabled:
             checks.append(("proxy HTTPS", bind_host, cfg.effective_proxy_https_port, "--proxy-https-port"))
+    elif (
+        cfg.reverse_proxy_enabled
+        and cfg.ingress_mode != IngressMode.MANAGED
+        and cfg.source_kind == SourceKind.DOCKERFILE
+        and cfg.proxy_routes is None
+        and cfg.host_port is not None
+    ):
+        checks.append(("service host port", _resolve_bind_host(cfg), cfg.host_port, "--host-port"))
     elif cfg.source_kind == SourceKind.DOCKERFILE and cfg.host_port is not None:
         checks.append(("service host port", _resolve_bind_host(cfg), cfg.host_port, "--host-port"))
 
@@ -118,7 +126,7 @@ def write_generated_compose(cfg: Config) -> None:
 
 
 def write_proxy_compose(cfg: Config) -> None:
-    if not cfg.reverse_proxy_enabled:
+    if not cfg.uses_managed_ingress:
         return
     nginx_conf = cfg.managed_nginx_conf_path
     bind_host = _resolve_bind_host(cfg)
@@ -162,7 +170,7 @@ def write_proxy_compose(cfg: Config) -> None:
 
 
 def write_nginx_proxy_config(cfg: Config, *, https_enabled: bool) -> None:
-    if not cfg.reverse_proxy_enabled:
+    if not cfg.uses_managed_ingress:
         return
     routes = cfg.effective_proxy_routes
     cert_base_domain = cfg.domain or ""
@@ -277,7 +285,7 @@ def _compose_prefix(cfg: Config) -> str:
     if base_compose is None:
         raise ValueError("Missing base compose file.")
     files = [base_compose]
-    if cfg.reverse_proxy_enabled:
+    if cfg.uses_managed_ingress:
         files.append(cfg.managed_proxy_compose_path)
     files_part = " ".join(f"-f {quote(str(path))}" for path in files)
     return f"docker compose -p {quote(cfg.compose_project_name)} {files_part}"
@@ -315,7 +323,7 @@ def _issue_certificate(cfg: Config) -> None:
 
 
 def _reload_nginx(cfg: Config) -> None:
-    if not cfg.reverse_proxy_enabled:
+    if not cfg.uses_managed_ingress:
         return
     workdir = quote(str(_compose_workdir(cfg)))
     prefix = _compose_prefix(cfg)
@@ -327,6 +335,181 @@ def _reload_nginx(cfg: Config) -> None:
         die("Failed to start nginx container for TLS reload.")
     if sh(reload_cmd, check=False) != 0:
         die("Failed to reload nginx after updating TLS configuration.")
+
+
+def _render_host_nginx_config(cfg: Config, *, https_enabled: bool) -> str:
+    routes = cfg.effective_proxy_routes
+    auth_guard = ""
+    if cfg.auth_token is not None:
+        auth_guard = (
+            f'        if ($http_authorization != "Bearer {cfg.auth_token}") {{\n'
+            "            return 401;\n"
+            "        }\n"
+        )
+    if not cfg.tls_enabled:
+        blocks = []
+        for route in routes:
+            blocks.append(
+                (
+                    "server {\n"
+                    "    listen 80;\n"
+                    f"    server_name {route.host};\n"
+                    "\n"
+                    "    location / {\n"
+                    f"{auth_guard}"
+                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
+                    "        proxy_http_version 1.1;\n"
+                    "        proxy_set_header Host $host;\n"
+                    "        proxy_set_header X-Real-IP $remote_addr;\n"
+                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                    "    }\n"
+                    "}\n"
+                )
+            )
+        return "\n".join(blocks) + "\n"
+
+    webroot = cfg.host_certbot_webroot_path
+    cert_base = cfg.cert_domain_names[0] if cfg.cert_domain_names else (cfg.domain or "")
+    blocks = []
+    if not https_enabled:
+        for route in routes:
+            blocks.append(
+                (
+                    "server {\n"
+                    "    listen 80;\n"
+                    f"    server_name {route.host};\n"
+                    "\n"
+                    "    location /.well-known/acme-challenge/ {\n"
+                    f"        root {webroot};\n"
+                    "    }\n"
+                    "\n"
+                    "    location / {\n"
+                    f"{auth_guard}"
+                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
+                    "        proxy_http_version 1.1;\n"
+                    "        proxy_set_header Host $host;\n"
+                    "        proxy_set_header X-Real-IP $remote_addr;\n"
+                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                    "    }\n"
+                    "}\n"
+                )
+            )
+        return "\n".join(blocks) + "\n"
+
+    for route in routes:
+        blocks.append(
+            (
+                "server {\n"
+                "    listen 80;\n"
+                f"    server_name {route.host};\n"
+                "\n"
+                "    location /.well-known/acme-challenge/ {\n"
+                f"        root {webroot};\n"
+                "    }\n"
+                "\n"
+                "    location / {\n"
+                "        return 301 https://$host$request_uri;\n"
+                "    }\n"
+                "}\n"
+            )
+        )
+        blocks.append(
+            (
+                "server {\n"
+                "    listen 443 ssl;\n"
+                f"    server_name {route.host};\n"
+                "\n"
+                f"    ssl_certificate /etc/letsencrypt/live/{cert_base}/fullchain.pem;\n"
+                f"    ssl_certificate_key /etc/letsencrypt/live/{cert_base}/privkey.pem;\n"
+                "    ssl_protocols TLSv1.2 TLSv1.3;\n"
+                "    ssl_prefer_server_ciphers on;\n"
+                "\n"
+                "    location / {\n"
+                f"{auth_guard}"
+                f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
+                "        proxy_http_version 1.1;\n"
+                "        proxy_set_header Host $host;\n"
+                "        proxy_set_header X-Real-IP $remote_addr;\n"
+                "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                "    }\n"
+                "}\n"
+            )
+        )
+    return "\n".join(blocks) + "\n"
+
+
+def _activate_host_nginx_site(cfg: Config, content: str) -> None:
+    available = cfg.host_nginx_site_available_path
+    enabled = cfg.host_nginx_site_enabled_path
+    available.parent.mkdir(parents=True, exist_ok=True)
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    available.write_text(content, encoding="utf-8")
+
+    if enabled.exists() or enabled.is_symlink():
+        if enabled.is_symlink() and Path(enabled.resolve()) == available:
+            return
+        enabled.unlink()
+    enabled.symlink_to(available)
+
+
+def _reload_or_start_host_nginx(cfg: Config) -> None:
+    if cfg.ingress_mode == IngressMode.TAKEOVER:
+        sh("systemctl start nginx")
+        return
+    if sh("systemctl reload nginx", check=False) != 0:
+        sh("systemctl start nginx")
+
+
+def _issue_certificate_host(cfg: Config) -> None:
+    if not cfg.tls_enabled:
+        return
+    domains = cfg.cert_domain_names
+    if not domains:
+        die("No certificate domains configured for host certbot.")
+    webroot = cfg.host_certbot_webroot_path
+    webroot.mkdir(parents=True, exist_ok=True)
+    certbot_email = cfg.certbot_email or ""
+    domains_arg = " ".join(f"-d {quote(name)}" for name in domains)
+    cmd = (
+        "certbot certonly --webroot "
+        f"-w {quote(str(webroot))} "
+        "--agree-tos --non-interactive --no-eff-email "
+        f"--email {quote(certbot_email)} "
+        f"{domains_arg} "
+        "--keep-until-expiring"
+    )
+    if not _run_with_retries(
+        cmd,
+        attempts=cfg.registry_retries,
+        backoff_seconds=cfg.retry_backoff_seconds,
+        context="host certbot certificate issuance",
+    ):
+        die(
+            "Host certbot certificate issuance failed after retries. "
+            f"Check DNS A/AAAA records and firewall rules for port 80."
+        )
+
+
+def _configure_host_nginx_ingress(cfg: Config) -> None:
+    if not cfg.reverse_proxy_enabled or cfg.ingress_mode == IngressMode.MANAGED:
+        return
+    if cfg.ingress_mode == IngressMode.TAKEOVER:
+        sh("systemctl stop nginx", check=False)
+
+    bootstrap = _render_host_nginx_config(cfg, https_enabled=False)
+    _activate_host_nginx_site(cfg, bootstrap)
+    sh("nginx -t")
+    _reload_or_start_host_nginx(cfg)
+
+    if cfg.tls_enabled:
+        _issue_certificate_host(cfg)
+        final_content = _render_host_nginx_config(cfg, https_enabled=True)
+        _activate_host_nginx_site(cfg, final_content)
+        sh("nginx -t")
+        _reload_or_start_host_nginx(cfg)
 
 
 def _run_with_retries(
@@ -363,7 +546,7 @@ def deploy_compose_source(cfg: Config) -> None:
     services = []
     if cfg.compose_services:
         services.extend(cfg.compose_services)
-    if cfg.reverse_proxy_enabled:
+    if cfg.uses_managed_ingress:
         write_proxy_compose(cfg)
         write_nginx_proxy_config(cfg, https_enabled=False)
         if cfg.compose_services and "nginx" not in services:
@@ -385,16 +568,18 @@ def deploy_compose_source(cfg: Config) -> None:
             "Docker compose deploy failed after retries. "
             "This is usually caused by registry/network instability."
         )
-    if cfg.tls_enabled:
+    if cfg.uses_managed_ingress and cfg.tls_enabled:
         _issue_certificate(cfg)
         write_nginx_proxy_config(cfg, https_enabled=True)
         _reload_nginx(cfg)
+    elif cfg.reverse_proxy_enabled and cfg.ingress_mode != IngressMode.MANAGED:
+        _configure_host_nginx_ingress(cfg)
 
 
 def deploy_dockerfile_source(cfg: Config) -> None:
     write_generated_compose(cfg)
     services = cfg.service_key
-    if cfg.reverse_proxy_enabled:
+    if cfg.uses_managed_ingress:
         write_proxy_compose(cfg)
         write_nginx_proxy_config(cfg, https_enabled=False)
         services = f"{cfg.service_key} nginx"
@@ -412,10 +597,12 @@ def deploy_dockerfile_source(cfg: Config) -> None:
             "Docker compose build/deploy failed after retries. "
             "This is usually caused by registry/network instability."
         )
-    if cfg.tls_enabled:
+    if cfg.uses_managed_ingress and cfg.tls_enabled:
         _issue_certificate(cfg)
         write_nginx_proxy_config(cfg, https_enabled=True)
         _reload_nginx(cfg)
+    elif cfg.reverse_proxy_enabled and cfg.ingress_mode != IngressMode.MANAGED:
+        _configure_host_nginx_ingress(cfg)
 
 
 def deploy_service(cfg: Config) -> None:

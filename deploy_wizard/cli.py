@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from deploy_wizard.config import AccessMode, Config, SourceKind
+from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind
 
 
 def build_config(argv: Optional[List[str]] = None) -> Config:
@@ -47,6 +47,13 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
         choices=[k.value for k in AccessMode],
         metavar="MODE",
         help="Network exposure profile: localhost, tailscale, or public.",
+    )
+    parser.add_argument(
+        "--ingress-mode",
+        default=IngressMode.MANAGED.value,
+        choices=[k.value for k in IngressMode],
+        metavar="MODE",
+        help="Ingress controller mode: managed, external-nginx, or takeover.",
     )
     parser.add_argument(
         "--registry-retries",
@@ -150,6 +157,7 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
             container_port=raw.container_port,
             bind_host=raw.bind_host,
             access_mode=AccessMode(raw.access_mode),
+            ingress_mode=IngressMode(raw.ingress_mode),
             registry_retries=raw.registry_retries,
             retry_backoff_seconds=raw.retry_backoff_seconds,
             tune_docker_daemon=not raw.no_docker_daemon_tuning,

@@ -71,12 +71,14 @@ def run_steps(steps: List[Step], bar: Any) -> None:
 
 
 def run_deploy(cfg) -> None:
+    from deploy_wizard.config import IngressMode
     from deploy_wizard.service import deploy_service, ensure_required_ports_available
     from deploy_wizard.system import (
         detect_ubuntu,
         ensure_base_packages,
         ensure_docker,
         ensure_docker_daemon_tuning,
+        ensure_nginx_and_certbot,
         require_root_reexec,
     )
 
@@ -96,6 +98,12 @@ def run_deploy(cfg) -> None:
                 "Harden Docker registry network settings",
                 ensure_docker_daemon_tuning,
                 skip_if=lambda: not cfg.tune_docker_daemon,
+            ),
+            Step(
+                "Install/verify nginx + certbot",
+                ensure_nginx_and_certbot,
+                skip_if=lambda: cfg.ingress_mode == IngressMode.MANAGED
+                or not cfg.reverse_proxy_enabled,
             ),
             Step("Check required host ports", lambda: ensure_required_ports_available(cfg)),
             Step("Deploy service", lambda: deploy_service(cfg)),
@@ -117,6 +125,7 @@ def _print_summary(cfg) -> None:
     print(f"Source dir   : {cfg.source_dir}")
     print(f"Source kind  : {cfg.source_kind.value}")
     print(f"Access mode  : {cfg.access_mode.value}")
+    print(f"Ingress mode : {cfg.ingress_mode.value}")
     print(f"Project dir  : {cfg.service_dir}")
     print(f"Retries      : {cfg.registry_retries} (backoff {cfg.retry_backoff_seconds}s)")
     print(f"Docker tune  : {'enabled' if cfg.tune_docker_daemon else 'disabled'}")
@@ -125,7 +134,7 @@ def _print_summary(cfg) -> None:
     else:
         compose_file = cfg.source_compose_path
     print(f"Compose file : {compose_file}")
-    if cfg.reverse_proxy_enabled:
+    if cfg.uses_managed_ingress:
         print(f"Proxy file   : {cfg.managed_proxy_compose_path}")
         if cfg.tls_enabled:
             print(
@@ -134,6 +143,12 @@ def _print_summary(cfg) -> None:
             )
         else:
             print(f"Proxy port   : {cfg.effective_proxy_http_port}")
+    elif cfg.reverse_proxy_enabled:
+        print(f"Nginx site   : {cfg.host_nginx_site_available_path}")
+        if cfg.tls_enabled:
+            print("Proxy ports  : 80->443 (host nginx)")
+        else:
+            print("Proxy port   : 80 (host nginx)")
     if cfg.tls_enabled:
         print(f"Domain       : {cfg.domain}")
         if len(cfg.cert_domain_names) > 1:
@@ -163,7 +178,7 @@ def _print_summary(cfg) -> None:
     print()
     print("Useful commands:")
     compose_files = [str(compose_file)]
-    if cfg.reverse_proxy_enabled:
+    if cfg.uses_managed_ingress:
         compose_files.append(str(cfg.managed_proxy_compose_path))
     compose_files_arg = " ".join(f"-f {path}" for path in compose_files)
     services = ""
@@ -179,7 +194,7 @@ def _print_summary(cfg) -> None:
         f"-p {cfg.compose_project_name} "
         f"{compose_files_arg} logs -f{services}"
     )
-    if cfg.tls_enabled:
+    if cfg.tls_enabled and cfg.uses_managed_ingress:
         print(
             "  docker compose "
             f"-p {cfg.compose_project_name} "
@@ -187,4 +202,9 @@ def _print_summary(cfg) -> None:
             "docker compose "
             f"-p {cfg.compose_project_name} "
             f"{compose_files_arg} exec -T nginx nginx -s reload"
+        )
+    elif cfg.tls_enabled and cfg.reverse_proxy_enabled:
+        print(
+            f"  certbot renew && nginx -t && systemctl reload nginx "
+            f"# site: {cfg.host_nginx_site_name}"
         )

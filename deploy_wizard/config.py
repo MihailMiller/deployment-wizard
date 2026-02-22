@@ -23,6 +23,12 @@ class AccessMode(str, Enum):
     PUBLIC = "public"
 
 
+class IngressMode(str, Enum):
+    MANAGED = "managed"
+    EXTERNAL_NGINX = "external-nginx"
+    TAKEOVER = "takeover"
+
+
 _SERVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$"
@@ -167,6 +173,7 @@ class Config:
     container_port: Optional[int] = None
     bind_host: str = "127.0.0.1"
     access_mode: AccessMode = AccessMode.LOCALHOST
+    ingress_mode: IngressMode = IngressMode.MANAGED
     registry_retries: int = 4
     retry_backoff_seconds: int = 5
     tune_docker_daemon: bool = True
@@ -330,8 +337,18 @@ class Config:
                 raise ValueError("certbot_email requires domain.")
 
         if self.reverse_proxy_enabled:
+            if self.ingress_mode != IngressMode.MANAGED and self.access_mode != AccessMode.PUBLIC:
+                raise ValueError(
+                    "ingress_mode external-nginx/takeover requires access_mode=public."
+                )
             if not self.tls_enabled and self.proxy_https_port is not None:
                 raise ValueError("proxy_https_port requires domain/certbot mode.")
+            if self.ingress_mode != IngressMode.MANAGED and (
+                self.proxy_http_port is not None or self.proxy_https_port is not None
+            ):
+                raise ValueError(
+                    "proxy_http_port/proxy_https_port are only used with ingress_mode=managed."
+                )
             if resolved_kind == SourceKind.DOCKERFILE and self.proxy_upstream_service:
                 raise ValueError(
                     "proxy_upstream_service is only supported for compose sources."
@@ -380,18 +397,29 @@ class Config:
                         )
             _ = self.effective_proxy_upstream_service
             _ = self.effective_proxy_upstream_port
-            _ = self.effective_proxy_http_port
-            if self.tls_enabled:
-                _ = self.effective_proxy_https_port
-                if self.effective_proxy_http_port == self.effective_proxy_https_port:
-                    raise ValueError(
-                        "proxy_http_port and proxy_https_port must be different."
-                    )
+            if self.ingress_mode == IngressMode.MANAGED:
+                _ = self.effective_proxy_http_port
+                if self.tls_enabled:
+                    _ = self.effective_proxy_https_port
+                    if self.effective_proxy_http_port == self.effective_proxy_https_port:
+                        raise ValueError(
+                            "proxy_http_port and proxy_https_port must be different."
+                        )
+            if (
+                self.ingress_mode != IngressMode.MANAGED
+                and self.source_kind == SourceKind.COMPOSE
+                and not self.proxy_routes
+            ):
+                raise ValueError(
+                    "Compose + external-nginx/takeover requires explicit proxy_routes "
+                    "(HOST=UPSTREAM:PORT) that host nginx can reach."
+                )
         else:
             if (
                 self.auth_token is not None
                 or self.proxy_http_port is not None
                 or self.proxy_https_port is not None
+                or self.ingress_mode != IngressMode.MANAGED
                 or self.proxy_upstream_service is not None
                 or self.proxy_upstream_port is not None
             ):
@@ -435,6 +463,26 @@ class Config:
         return self.service_dir / "nginx" / "default.conf"
 
     @property
+    def host_nginx_site_name(self) -> str:
+        return f"deploy_wizard_{self.compose_project_name}.conf"
+
+    @property
+    def host_nginx_site_available_path(self) -> Path:
+        return Path("/etc/nginx/sites-available") / self.host_nginx_site_name
+
+    @property
+    def host_nginx_site_enabled_path(self) -> Path:
+        return Path("/etc/nginx/sites-enabled") / self.host_nginx_site_name
+
+    @property
+    def host_certbot_webroot_path(self) -> Path:
+        return self.service_dir / "certbot-www-host"
+
+    @property
+    def uses_managed_ingress(self) -> bool:
+        return self.reverse_proxy_enabled and self.ingress_mode == IngressMode.MANAGED
+
+    @property
     def tls_enabled(self) -> bool:
         return self.domain is not None
 
@@ -454,6 +502,20 @@ class Config:
             raise ValueError("No routes without proxy mode.")
         if self.proxy_routes:
             return self.proxy_routes
+        if self.ingress_mode != IngressMode.MANAGED:
+            if self.source_kind == SourceKind.DOCKERFILE and self.host_port is not None:
+                host = self.domain if self.domain is not None else "_"
+                return (
+                    ProxyRoute(
+                        host=host,
+                        upstream_host="127.0.0.1",
+                        upstream_port=self.host_port,
+                    ),
+                )
+            raise ValueError(
+                "external-nginx/takeover requires explicit proxy_routes, "
+                "or dockerfile mode with host_port set."
+            )
         host = self.domain if self.domain is not None else "_"
         return (
             ProxyRoute(

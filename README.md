@@ -55,6 +55,7 @@ Key flags:
 - `--host-port` + `--container-port` (for Dockerfile mode)
 - `--bind-host`
 - `--access-mode {localhost,tailscale,public}`
+- `--ingress-mode {managed,external-nginx,takeover}`
 - `--compose-service` (repeat for multiple compose services; default is all)
 - `--registry-retries`
 - `--retry-backoff-seconds`
@@ -67,10 +68,14 @@ Key flags:
 - `--proxy-upstream-port`
 
 Notes:
-- For compose sources, `--access-mode` values other than `localhost` require managed proxy mode (`--domain` or `--auth-token`).
+- For compose sources, `--access-mode` values other than `localhost` require proxy mode (`--domain` or `--auth-token`).
 - `--domain` (Let's Encrypt HTTP-01) requires `--access-mode public`.
+- `--ingress-mode managed` keeps nginx+certbot inside Docker (default).
+- `--ingress-mode external-nginx` writes and reloads a host nginx site.
+- `--ingress-mode takeover` stops host nginx before reconfigure and starts it again.
 - Interactive mode auto-selects free proxy ports (prefers 80/443) and only falls back to manual entry if needed.
 - Interactive mode auto-selects a proxy upstream from discovered compose services unless you configure advanced `--proxy-route` entries.
+- For public TLS in interactive mode, the wizard requires host ports `80/443` by default and asks before switching to non-standard ports.
 
 TLS reverse proxy example:
 
@@ -108,6 +113,22 @@ sudo python -m deploy_wizard deploy --batch \
   --proxy-route wiki.example.com=orchestrator:8090 \
   --proxy-route sickbeard.example.com=media:8081 \
   --proxy-route mail.example.com=mailer:4000
+```
+
+Host nginx integration example (no dockerized nginx):
+
+```bash
+sudo python -m deploy_wizard deploy --batch \
+  --service-name llm-stack \
+  --source-dir /path/to/compose-source \
+  --source-kind compose \
+  --access-mode public \
+  --ingress-mode external-nginx \
+  --domain ingress.example.com \
+  --certbot-email ops@example.com \
+  --proxy-route studio.example.com=127.0.0.1:8000 \
+  --proxy-route api.example.com=127.0.0.1:8080 \
+  --proxy-route logs.example.com=127.0.0.1:8010
 ```
 
 Tailscale-only example (no public exposure):

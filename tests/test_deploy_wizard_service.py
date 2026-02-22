@@ -3,9 +3,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from deploy_wizard.config import AccessMode, Config, SourceKind
+from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind
 from deploy_wizard.service import (
     _issue_certificate,
+    _render_host_nginx_config,
     _run_with_retries,
     deploy_compose_source,
     deploy_dockerfile_source,
@@ -123,6 +124,33 @@ class DeployWizardServiceTests(unittest.TestCase):
 
         cmd = run_mock.call_args[0][0]
         self.assertIn(" up -d --build api worker", cmd)
+
+    def test_deploy_compose_source_external_nginx_configures_host_ingress(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                access_mode=AccessMode.PUBLIC,
+                ingress_mode=IngressMode.EXTERNAL_NGINX,
+                auth_token="TokenABC123",
+                proxy_routes=("wiki.example.com=orchestrator:8090",),
+            )
+            with mock.patch("deploy_wizard.service._run_with_retries", return_value=True) as run_mock, \
+                 mock.patch("deploy_wizard.service._configure_host_nginx_ingress") as host_mock:
+                deploy_compose_source(cfg)
+
+        cmd = run_mock.call_args[0][0]
+        self.assertIn(" up -d --build", cmd)
+        self.assertNotIn(" nginx", cmd)
+        host_mock.assert_called_once()
 
     def test_write_proxy_compose_and_nginx_conf(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -305,6 +333,33 @@ class DeployWizardServiceTests(unittest.TestCase):
             cmd = run_mock.call_args[0][0]
             self.assertIn("-d api.example.com", cmd)
             self.assertIn("-d wiki.example.com", cmd)
+
+    def test_render_host_nginx_config_external_tls_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                access_mode=AccessMode.PUBLIC,
+                ingress_mode=IngressMode.EXTERNAL_NGINX,
+                domain="api.example.com",
+                certbot_email="ops@example.com",
+                proxy_routes=("wiki.example.com=orchestrator:8090",),
+            )
+            content = _render_host_nginx_config(cfg, https_enabled=True)
+            self.assertIn("server_name wiki.example.com;", content)
+            self.assertIn("proxy_pass http://orchestrator:8090;", content)
+            self.assertIn(
+                "ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;",
+                content,
+            )
 
 
 if __name__ == "__main__":

@@ -131,6 +131,33 @@ class DeployWizardCliTests(unittest.TestCase):
             self.assertEqual(len(cfg.proxy_routes or ()), 2)
             self.assertEqual(cfg.effective_proxy_routes[0].host, "wiki.example.com")
 
+    def test_build_config_with_external_nginx_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            cfg = build_config(
+                [
+                    "--service-name",
+                    "demo",
+                    "--source-dir",
+                    str(src),
+                    "--access-mode",
+                    "public",
+                    "--ingress-mode",
+                    "external-nginx",
+                    "--auth-token",
+                    "TokenABC123",
+                    "--proxy-route",
+                    "wiki.example.com=orchestrator:8090",
+                ]
+            )
+            self.assertEqual(cfg.ingress_mode.value, "external-nginx")
+
     def test_build_config_with_auth_token_and_access_mode(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             src = Path(td)
@@ -174,6 +201,7 @@ class DeployWizardCliTests(unittest.TestCase):
         self.assertIn("--certbot-email", proc.stdout)
         self.assertIn("--auth-token", proc.stdout)
         self.assertIn("--access-mode", proc.stdout)
+        self.assertIn("--ingress-mode", proc.stdout)
         self.assertIn("--proxy-http-port", proc.stdout)
         self.assertIn("--proxy-https-port", proc.stdout)
         self.assertIn("--proxy-route", proc.stdout)

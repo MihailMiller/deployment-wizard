@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deploy_wizard.config import AccessMode, Config, SourceKind, list_compose_services
+from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind, list_compose_services
 
 
 class DeployWizardConfigTests(unittest.TestCase):
@@ -341,6 +341,43 @@ class DeployWizardConfigTests(unittest.TestCase):
                     compose_services=("orchestrator",),
                     proxy_routes=("mail.example.com=mail:4000",),
                 )
+
+    def test_external_nginx_compose_requires_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.COMPOSE,
+                    access_mode=AccessMode.PUBLIC,
+                    ingress_mode=IngressMode.EXTERNAL_NGINX,
+                    auth_token="TokenABC123",
+                )
+
+    def test_external_nginx_dockerfile_uses_localhost_host_port_route(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+            cfg = Config(
+                service_name="svc",
+                source_dir=src,
+                source_kind=SourceKind.DOCKERFILE,
+                access_mode=AccessMode.PUBLIC,
+                ingress_mode=IngressMode.EXTERNAL_NGINX,
+                host_port=18080,
+                container_port=8080,
+                auth_token="TokenABC123",
+            )
+            route = cfg.effective_proxy_routes[0]
+            self.assertEqual(route.upstream_host, "127.0.0.1")
+            self.assertEqual(route.upstream_port, 18080)
 
 
 if __name__ == "__main__":

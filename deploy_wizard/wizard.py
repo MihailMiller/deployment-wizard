@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple
 from deploy_wizard.config import (
     AccessMode,
     Config,
+    IngressMode,
     parse_proxy_route,
     SourceKind,
     detect_source_kind,
@@ -73,6 +74,16 @@ def _choose_access_mode() -> AccessMode:
     ]
     idx = _choose(options, default=1)
     return AccessMode(options[idx - 1][0])
+
+
+def _choose_ingress_mode() -> IngressMode:
+    options = [
+        (IngressMode.MANAGED.value, "Managed docker nginx + certbot"),
+        (IngressMode.EXTERNAL_NGINX.value, "Use existing host nginx + certbot"),
+        (IngressMode.TAKEOVER.value, "Stop/start host nginx during reconfigure"),
+    ]
+    idx = _choose(options, default=1)
+    return IngressMode(options[idx - 1][0])
 
 
 def _default_service_key(service_name: str) -> str:
@@ -272,6 +283,7 @@ def run_wizard() -> Config:
     container_port: Optional[int] = None
     bind_host = "127.0.0.1"
     access_mode = AccessMode.LOCALHOST
+    ingress_mode = IngressMode.MANAGED
     compose_services: Optional[Tuple[str, ...]] = None
     discovered_services: List[str] = []
     domain: Optional[str] = None
@@ -326,24 +338,72 @@ def run_wizard() -> Config:
 
     proxy_enabled = domain is not None or auth_token is not None
     if proxy_enabled:
+        ingress_mode = _choose_ingress_mode()
         proxy_bind_host = "0.0.0.0" if access_mode == AccessMode.PUBLIC else "127.0.0.1"
-        proxy_http_port = _auto_pick_port(
-            bind_host=proxy_bind_host,
-            preferred=80,
-            label="Proxy HTTP host port",
-        )
-        if domain is not None:
-            proxy_https_port = _auto_pick_port(
-                bind_host=proxy_bind_host,
-                preferred=443,
-                avoid={proxy_http_port},
-                label="Proxy HTTPS host port",
+        if (
+            source_kind == SourceKind.DOCKERFILE
+            and ingress_mode != IngressMode.MANAGED
+            and host_port is None
+        ):
+            if container_port is None:
+                container_port = _prompt_int("Application container port", 8080)
+            bind_host = "127.0.0.1"
+            host_port = _auto_pick_port(
+                bind_host=bind_host,
+                preferred=container_port,
+                label="Local upstream host port",
             )
-            if proxy_http_port != 80 or proxy_https_port != 443:
-                print(
-                    "Warning: Let's Encrypt HTTP-01 normally requires external port 80. "
-                    "Use host/network forwarding from :80/:443 to the selected proxy ports."
+            print(
+                "Host nginx mode: auto-mapped dockerfile service to "
+                f"{bind_host}:{host_port}->{container_port}"
+            )
+        if ingress_mode == IngressMode.MANAGED:
+            if domain is not None:
+                proxy_http_port = 80
+                proxy_https_port = 443
+                http_ok, http_err = _port_available(proxy_bind_host, 80)
+                https_ok, https_err = _port_available(proxy_bind_host, 443)
+                if not http_ok or not https_ok:
+                    print(
+                        "Public HTTPS mode expects host ports 80 and 443 to be free "
+                        "for Let's Encrypt HTTP-01 and standard browser access."
+                    )
+                    if not http_ok:
+                        print(f"  - {proxy_bind_host}:80 unavailable ({http_err})")
+                    if not https_ok:
+                        print(f"  - {proxy_bind_host}:443 unavailable ({https_err})")
+                    if not _confirm(
+                        "Use advanced non-standard proxy ports instead?",
+                        default=False,
+                    ):
+                        print(
+                            "Aborted. Free ports 80/443 (or choose external-nginx/takeover) "
+                            "and run again."
+                        )
+                        sys.exit(1)
+                    proxy_http_port = _auto_pick_port(
+                        bind_host=proxy_bind_host,
+                        preferred=80,
+                        label="Proxy HTTP host port",
+                    )
+                    proxy_https_port = _auto_pick_port(
+                        bind_host=proxy_bind_host,
+                        preferred=443,
+                        avoid={proxy_http_port},
+                        label="Proxy HTTPS host port",
+                    )
+                    print(
+                        "Warning: Let's Encrypt HTTP-01 normally requires external port 80. "
+                        "Use host/network forwarding from :80/:443 to the selected proxy ports."
+                    )
+            else:
+                proxy_http_port = _auto_pick_port(
+                    bind_host=proxy_bind_host,
+                    preferred=80,
+                    label="Proxy HTTP host port",
                 )
+        elif domain is not None:
+            print("Host nginx ingress mode selected; using standard host ports 80/443.")
         default_upstream = _default_service_key(service_name)
         default_upstream_port = container_port or 8080
         if source_kind == SourceKind.COMPOSE:
@@ -358,6 +418,21 @@ def run_wizard() -> Config:
             default_upstream=default_upstream,
             default_port=default_upstream_port,
         )
+        if source_kind == SourceKind.COMPOSE and ingress_mode != IngressMode.MANAGED and proxy_routes is None:
+            print("external-nginx/takeover with compose requires at least one hostname route.")
+            routes: List[str] = []
+            default_route = f"{default_host}={default_upstream}:{default_upstream_port}"
+            while True:
+                raw = _prompt("Proxy route", default_route if not routes else "")
+                try:
+                    route = parse_proxy_route(raw)
+                except ValueError as exc:
+                    print(f"Invalid route: {exc}")
+                    continue
+                routes.append(f"{route.host}={route.upstream_host}:{route.upstream_port}")
+                if not _confirm("Add another route?", default=False):
+                    break
+            proxy_routes = tuple(routes)
         if source_kind == SourceKind.COMPOSE:
             if proxy_routes is None:
                 proxy_upstream_service = default_upstream
@@ -382,6 +457,7 @@ def run_wizard() -> Config:
         container_port=container_port,
         bind_host=bind_host,
         access_mode=access_mode,
+        ingress_mode=ingress_mode,
         compose_services=compose_services,
         domain=domain,
         certbot_email=certbot_email,
@@ -400,6 +476,7 @@ def run_wizard() -> Config:
     print(f"  Source kind  : {cfg.source_kind.value}")
     print(f"  Base dir     : {cfg.base_dir}")
     print(f"  Access mode  : {cfg.access_mode.value}")
+    print(f"  Ingress mode : {cfg.ingress_mode.value}")
     if cfg.host_port is not None:
         print(
             f"  Port mapping : "
