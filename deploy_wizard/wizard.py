@@ -140,6 +140,34 @@ def _pick_open_port(
         print("Choose another port.")
 
 
+def _auto_pick_port(
+    *,
+    bind_host: str,
+    preferred: int,
+    avoid: Optional[set] = None,
+    label: str,
+) -> int:
+    blocked = avoid or set()
+    if preferred not in blocked:
+        ok, _ = _port_available(bind_host, preferred)
+        if ok:
+            print(f"{label}: using {bind_host}:{preferred}")
+            return preferred
+        _, err = _port_available(bind_host, preferred)
+        print(f"{label}: {bind_host}:{preferred} unavailable ({err}).")
+
+    suggestion = _suggest_port(
+        bind_host,
+        8080 if preferred < 1024 else preferred + 1,
+        avoid=blocked,
+    )
+    if suggestion is None:
+        print(f"{label}: no free port found automatically, falling back to manual entry.")
+        return _pick_open_port(label, bind_host, preferred, avoid=blocked)
+    print(f"{label}: auto-selected {bind_host}:{suggestion}")
+    return suggestion
+
+
 def _pick_proxy_routes(
     *,
     default_host: str,
@@ -299,18 +327,22 @@ def run_wizard() -> Config:
     proxy_enabled = domain is not None or auth_token is not None
     if proxy_enabled:
         proxy_bind_host = "0.0.0.0" if access_mode == AccessMode.PUBLIC else "127.0.0.1"
-        proxy_http_port = _pick_open_port("Proxy HTTP host port", proxy_bind_host, 80)
+        proxy_http_port = _auto_pick_port(
+            bind_host=proxy_bind_host,
+            preferred=80,
+            label="Proxy HTTP host port",
+        )
         if domain is not None:
-            proxy_https_port = _pick_open_port(
-                "Proxy HTTPS host port",
-                proxy_bind_host,
-                443,
+            proxy_https_port = _auto_pick_port(
+                bind_host=proxy_bind_host,
+                preferred=443,
                 avoid={proxy_http_port},
+                label="Proxy HTTPS host port",
             )
-            if proxy_http_port != 80:
+            if proxy_http_port != 80 or proxy_https_port != 443:
                 print(
                     "Warning: Let's Encrypt HTTP-01 normally requires external port 80. "
-                    "Use host/network forwarding from :80 to this selected proxy HTTP port."
+                    "Use host/network forwarding from :80/:443 to the selected proxy ports."
                 )
         default_upstream = _default_service_key(service_name)
         default_upstream_port = container_port or 8080
@@ -328,14 +360,12 @@ def run_wizard() -> Config:
         )
         if source_kind == SourceKind.COMPOSE:
             if proxy_routes is None:
-                default_service = ""
-                if compose_services:
-                    default_service = compose_services[0]
-                elif discovered_services:
-                    default_service = discovered_services[0]
-                if default_service:
-                    proxy_upstream_service = _prompt("Upstream compose service", default_service)
-                proxy_upstream_port = _prompt_int("Upstream container port", 80)
+                proxy_upstream_service = default_upstream
+                proxy_upstream_port = default_upstream_port
+                print(
+                    "Proxy upstream auto-selected: "
+                    f"{proxy_upstream_service}:{proxy_upstream_port}"
+                )
         else:
             if proxy_routes is None:
                 if container_port is not None:

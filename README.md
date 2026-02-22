@@ -69,7 +69,8 @@ Key flags:
 Notes:
 - For compose sources, `--access-mode` values other than `localhost` require managed proxy mode (`--domain` or `--auth-token`).
 - `--domain` (Let's Encrypt HTTP-01) requires `--access-mode public`.
-- Interactive mode proactively checks proxy host port availability and suggests alternatives.
+- Interactive mode auto-selects free proxy ports (prefers 80/443) and only falls back to manual entry if needed.
+- Interactive mode auto-selects a proxy upstream from discovered compose services unless you configure advanced `--proxy-route` entries.
 
 TLS reverse proxy example:
 
