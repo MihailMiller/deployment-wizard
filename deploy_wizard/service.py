@@ -391,6 +391,7 @@ def _issue_certificate(cfg: Config) -> None:
         f"cd {quote(str(_compose_workdir(cfg)))} && "
         f"{_compose_prefix(cfg)} run --rm certbot "
         f"certonly --webroot -w /var/www/certbot "
+        f"--cert-name {quote(primary_domain)} --expand "
         f"--agree-tos --non-interactive --no-eff-email "
         f"--email {quote(certbot_email)} "
         f"{domains_arg} "
@@ -504,10 +505,12 @@ def _issue_certificate_host(cfg: Config) -> None:
     webroot = cfg.host_certbot_webroot_path
     webroot.mkdir(parents=True, exist_ok=True)
     certbot_email = cfg.certbot_email or ""
+    primary_domain = domains[0]
     domains_arg = " ".join(f"-d {quote(name)}" for name in domains)
     cmd = (
         "certbot certonly --webroot "
         f"-w {quote(str(webroot))} "
+        f"--cert-name {quote(primary_domain)} --expand "
         "--agree-tos --non-interactive --no-eff-email "
         f"--email {quote(certbot_email)} "
         f"{domains_arg} "

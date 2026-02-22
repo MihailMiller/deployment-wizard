@@ -75,6 +75,7 @@ Notes:
 - `--ingress-mode takeover` stops host nginx before reconfigure and starts it again.
 - In `external-nginx`/`takeover` mode for compose sources, proxy upstreams must be host-reachable (for example `127.0.0.1:8080`), not compose DNS names like `orchestrator`.
 - Browser access with `--auth-token`: enter username `token` and password `<your-token>` in the Basic Auth prompt.
+- Certificate issuance uses `--cert-name <primary-domain> --expand`, so new route hostnames are added to SANs on redeploy.
 - Interactive mode auto-selects free proxy ports (prefers 80/443) and only falls back to manual entry if needed.
 - Interactive mode suggests default subdomain routes in TLS/domain mode (`service.example.com`) and path routes in token-only mode (`/service`).
 - Route suggestions skip services without detectable ports and, when deploying all compose services, prefer services with published host `ports:`.

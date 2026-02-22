@@ -6,6 +6,7 @@ from unittest import mock
 from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind
 from deploy_wizard.service import (
     _issue_certificate,
+    _issue_certificate_host,
     _render_host_nginx_config,
     _run_with_retries,
     deploy_compose_source,
@@ -367,6 +368,36 @@ class DeployWizardServiceTests(unittest.TestCase):
             with mock.patch("deploy_wizard.service._run_with_retries", return_value=True) as run_mock:
                 _issue_certificate(cfg)
             cmd = run_mock.call_args[0][0]
+            self.assertIn("--cert-name api.example.com", cmd)
+            self.assertIn("--expand", cmd)
+            self.assertIn("-d api.example.com", cmd)
+            self.assertIn("-d wiki.example.com", cmd)
+
+    def test_issue_certificate_host_uses_cert_name_and_expand(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                base_dir=Path(td) / "services",
+                access_mode=AccessMode.PUBLIC,
+                ingress_mode=IngressMode.EXTERNAL_NGINX,
+                domain="api.example.com",
+                certbot_email="ops@example.com",
+                proxy_routes=("wiki.example.com=127.0.0.1:8080",),
+            )
+            with mock.patch("deploy_wizard.service._run_with_retries", return_value=True) as run_mock:
+                _issue_certificate_host(cfg)
+            cmd = run_mock.call_args[0][0]
+            self.assertIn("--cert-name api.example.com", cmd)
+            self.assertIn("--expand", cmd)
             self.assertIn("-d api.example.com", cmd)
             self.assertIn("-d wiki.example.com", cmd)
 
