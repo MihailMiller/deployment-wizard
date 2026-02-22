@@ -115,10 +115,10 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
         "--proxy-route",
         action="append",
         default=None,
-        metavar="HOST=UPSTREAM:PORT",
+        metavar="HOST[/PATH]=UPSTREAM:PORT",
         help=(
-            "Hostname-based proxy route. Repeat for multiple routes, e.g. "
-            "--proxy-route wiki.example.com=orchestrator:8090"
+            "Hostname/path proxy route. Repeat for multiple routes, e.g. "
+            "--proxy-route app.example.com/orchestrator=orchestrator:8080"
         ),
     )
     parser.add_argument(

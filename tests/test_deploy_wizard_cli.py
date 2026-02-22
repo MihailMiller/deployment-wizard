@@ -121,15 +121,16 @@ class DeployWizardCliTests(unittest.TestCase):
                     "--auth-token",
                     "TokenABC123",
                     "--proxy-route",
-                    "wiki.example.com=orchestrator:8090",
+                    "apps.example.com/orchestrator=orchestrator:8090",
                     "--proxy-route",
-                    "mail.example.com=mail:4000",
+                    "apps.example.com/logbook=mail:4000",
                     "--proxy-http-port",
                     "8088",
                 ]
             )
             self.assertEqual(len(cfg.proxy_routes or ()), 2)
-            self.assertEqual(cfg.effective_proxy_routes[0].host, "wiki.example.com")
+            self.assertEqual(cfg.effective_proxy_routes[0].host, "apps.example.com")
+            self.assertEqual(cfg.effective_proxy_routes[0].path_prefix, "/orchestrator")
 
     def test_build_config_with_external_nginx_mode(self) -> None:
         with tempfile.TemporaryDirectory() as td:

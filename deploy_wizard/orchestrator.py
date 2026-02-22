@@ -166,7 +166,7 @@ def _print_summary(cfg) -> None:
             print(
                 "Proxy routes : "
                 + ", ".join(
-                    f"{r.host}->{r.upstream_host}:{r.upstream_port}"
+                    f"{r.host}{r.path_prefix}->{r.upstream_host}:{r.upstream_port}"
                     for r in cfg.proxy_routes
                 )
             )

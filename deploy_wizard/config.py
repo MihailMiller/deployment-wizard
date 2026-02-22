@@ -37,6 +37,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+\-]{8,}$")
 _SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9*_.-]+$")
 _UPSTREAM_HOST_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_PATH_PREFIX_RE = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@%/\-]*$")
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,24 @@ class ProxyRoute:
     host: str
     upstream_host: str
     upstream_port: int
+    path_prefix: str = "/"
+
+
+def _normalize_path_prefix(raw: str) -> str:
+    text = str(raw).strip()
+    if not text:
+        return "/"
+    if not text.startswith("/"):
+        text = "/" + text
+    text = re.sub(r"/+", "/", text)
+    if len(text) > 1 and text.endswith("/"):
+        text = text[:-1]
+    if " " in text or not _PATH_PREFIX_RE.fullmatch(text):
+        raise ValueError(
+            "proxy_route path is invalid. "
+            "Use URL path prefixes like /service or /api/v1."
+        )
+    return text
 
 
 def parse_proxy_route(raw: str) -> ProxyRoute:
@@ -52,10 +71,17 @@ def parse_proxy_route(raw: str) -> ProxyRoute:
         raise ValueError("proxy_route must not be empty.")
     if "=" not in text:
         raise ValueError(
-            "proxy_route format must be '<host>=<upstream-host>:<port>'."
+            "proxy_route format must be '<host>[/path]=<upstream-host>:<port>'."
         )
     host_part, target_part = text.split("=", 1)
-    host = host_part.strip().lower()
+    host_field = host_part.strip().lower()
+    if "/" in host_field:
+        host_token, path_token = host_field.split("/", 1)
+        host = host_token.strip()
+        path_prefix = _normalize_path_prefix(path_token)
+    else:
+        host = host_field
+        path_prefix = "/"
     target = target_part.strip()
     if ":" not in target:
         raise ValueError(
@@ -84,7 +110,12 @@ def parse_proxy_route(raw: str) -> ProxyRoute:
     if not (1 <= port <= 65535):
         raise ValueError("proxy_route upstream port must be between 1 and 65535.")
 
-    return ProxyRoute(host=host, upstream_host=upstream_host, upstream_port=port)
+    return ProxyRoute(
+        host=host,
+        upstream_host=upstream_host,
+        upstream_port=port,
+        path_prefix=path_prefix,
+    )
 
 
 def find_compose_file(source_dir: Path) -> Optional[Path]:
@@ -149,6 +180,115 @@ def list_compose_services(compose_path: Path) -> List[str]:
             names.append(name)
 
     return names
+
+
+def _extract_container_port(token: str) -> Optional[int]:
+    text = str(token).strip().strip("'").strip('"')
+    if not text:
+        return None
+    text = text.split("/", 1)[0].strip()
+    match = re.search(r"(\d+)\s*$", text)
+    if match is None:
+        return None
+    value = int(match.group(1))
+    if 1 <= value <= 65535:
+        return value
+    return None
+
+
+def list_compose_service_ports(
+    compose_path: Path,
+    *,
+    include_expose: bool = True,
+) -> dict:
+    """
+    Best-effort parser for first exposed/container port per compose service.
+    Supports common list forms in `ports:` and `expose:`.
+    Set include_expose=False to only include published host `ports:`.
+    """
+    if not compose_path.exists() or not compose_path.is_file():
+        return {}
+
+    key_pattern = re.compile(
+        r'^(\s*)(?:'
+        r'"([^"]+)"|'
+        r"'([^']+)'|"
+        r"([A-Za-z0-9_.-]+)"
+        r')\s*:\s*(?:$|#)'
+    )
+    item_pattern = re.compile(r'^\s*-\s*("?)([^"]+)\1\s*(?:#.*)?$')
+    ports = {}
+    services_indent: Optional[int] = None
+    service_indent: Optional[int] = None
+    current_service: Optional[str] = None
+    current_service_indent: Optional[int] = None
+    section: Optional[str] = None
+    section_indent: Optional[int] = None
+
+    lines = compose_path.read_text(encoding="utf-8").splitlines()
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+
+        if services_indent is None:
+            services_match = re.match(r"^(\s*)services\s*:\s*(?:$|#)", line)
+            if services_match is not None:
+                services_indent = len(services_match.group(1))
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent <= services_indent:
+            break
+
+        key_match = key_pattern.match(raw_line)
+        if key_match is not None:
+            key_indent = len(key_match.group(1))
+            name = key_match.group(2) or key_match.group(3) or key_match.group(4) or ""
+            if service_indent is None and name:
+                service_indent = key_indent
+            if name and service_indent is not None and key_indent == service_indent:
+                current_service = name
+                current_service_indent = key_indent
+                section = None
+                section_indent = None
+                continue
+
+        if current_service is None or current_service_indent is None:
+            continue
+        if indent <= current_service_indent:
+            current_service = None
+            section = None
+            section_indent = None
+            continue
+
+        section_match = re.match(r"^\s*(ports|expose)\s*:\s*(?:$|#)", raw_line)
+        if section_match is not None:
+            section = section_match.group(1)
+            section_indent = indent
+            continue
+
+        if section is not None and section_indent is not None and indent <= section_indent:
+            section = None
+            section_indent = None
+
+        if (
+            section in ("ports", "expose")
+            and section_indent is not None
+            and indent > section_indent
+        ):
+            if section == "expose" and not include_expose:
+                continue
+            item_match = item_pattern.match(raw_line)
+            if item_match is None:
+                continue
+            if current_service in ports:
+                continue
+            parsed_port = _extract_container_port(item_match.group(2))
+            if parsed_port is not None:
+                ports[current_service] = parsed_port
+
+    return ports
 
 
 def detect_source_kind(source_dir: Path) -> SourceKind:
@@ -270,12 +410,16 @@ class Config:
         )
         normalized_routes: List[ProxyRoute] = []
         if proxy_routes_raw is not None:
-            seen_hosts = set()
+            seen_keys = set()
             for item in proxy_routes_raw:
                 route = item if isinstance(item, ProxyRoute) else parse_proxy_route(item)
-                if route.host in seen_hosts:
-                    raise ValueError(f"proxy_routes contains duplicate host: {route.host}")
-                seen_hosts.add(route.host)
+                key = (route.host, route.path_prefix)
+                if key in seen_keys:
+                    raise ValueError(
+                        "proxy_routes contains duplicate host/path: "
+                        f"{route.host}{route.path_prefix}"
+                    )
+                seen_keys.add(key)
                 normalized_routes.append(route)
             object.__setattr__(self, "proxy_routes", tuple(normalized_routes))
 

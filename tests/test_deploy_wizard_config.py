@@ -2,7 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind, list_compose_services
+from deploy_wizard.config import (
+    AccessMode,
+    Config,
+    IngressMode,
+    SourceKind,
+    list_compose_service_ports,
+    list_compose_services,
+)
 
 
 class DeployWizardConfigTests(unittest.TestCase):
@@ -73,6 +80,93 @@ class DeployWizardConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(list_compose_services(compose), ["api", "worker"])
+
+    def test_list_compose_service_ports_discovers_ports(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            compose = src / "docker-compose.yml"
+            compose.write_text(
+                "services:\n"
+                "  workflow-studio:\n"
+                "    image: example/workflow-studio:latest\n"
+                "    ports:\n"
+                '      - "8000:8000"\n'
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n"
+                "    ports:\n"
+                '      - "127.0.0.1:8080:8080"\n'
+                "  logbook:\n"
+                "    image: example/logbook:latest\n"
+                "    expose:\n"
+                '      - "8010"\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                list_compose_service_ports(compose),
+                {
+                    "workflow-studio": 8000,
+                    "orchestrator": 8080,
+                    "logbook": 8010,
+                },
+            )
+            self.assertEqual(
+                list_compose_service_ports(compose, include_expose=False),
+                {
+                    "workflow-studio": 8000,
+                    "orchestrator": 8080,
+                },
+            )
+
+    def test_list_compose_service_ports_handles_extensions_and_anchors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            compose = src / "docker-compose.yml"
+            compose.write_text(
+                "x-logging: &default-logging\n"
+                "  driver: json-file\n"
+                "  options:\n"
+                '    max-size: "10m"\n'
+                '    max-file: "3"\n'
+                "\n"
+                "services:\n"
+                "  orchestrator:\n"
+                "    build: ./orchestrator\n"
+                "    ports:\n"
+                '      - "127.0.0.1:8080:8080"\n'
+                "    logging: *default-logging\n"
+                "  workflow-studio:\n"
+                "    build:\n"
+                "      context: ./apps\n"
+                "      dockerfile: workflow-studio/Dockerfile\n"
+                "    ports:\n"
+                '      - "127.0.0.1:8000:8000"\n'
+                "    logging: *default-logging\n"
+                "  stt:\n"
+                "    build: ./services/stt\n"
+                "    expose:\n"
+                '      - "10300"\n'
+                "    logging: *default-logging\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                list_compose_services(compose),
+                ["orchestrator", "workflow-studio", "stt"],
+            )
+            self.assertEqual(
+                list_compose_service_ports(compose),
+                {
+                    "orchestrator": 8080,
+                    "workflow-studio": 8000,
+                    "stt": 10300,
+                },
+            )
+            self.assertEqual(
+                list_compose_service_ports(compose, include_expose=False),
+                {
+                    "orchestrator": 8080,
+                    "workflow-studio": 8000,
+                },
+            )
 
     def test_compose_services_must_exist_when_discoverable(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -279,6 +373,58 @@ class DeployWizardConfigTests(unittest.TestCase):
                 cfg.cert_domain_names,
                 ("api.example.com", "wiki.example.com", "mail.example.com"),
             )
+
+    def test_proxy_routes_support_host_path_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n"
+                "  logbook:\n"
+                "    image: example/logbook:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="svc",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                access_mode=AccessMode.PUBLIC,
+                domain="apps.example.com",
+                certbot_email="ops@example.com",
+                proxy_routes=(
+                    "apps.example.com/orchestrator=orchestrator:8080",
+                    "apps.example.com/logbook=logbook:8010",
+                ),
+            )
+            self.assertEqual(len(cfg.effective_proxy_routes), 2)
+            self.assertEqual(cfg.effective_proxy_routes[0].path_prefix, "/orchestrator")
+            self.assertEqual(cfg.effective_proxy_routes[1].path_prefix, "/logbook")
+            self.assertEqual(cfg.cert_domain_names, ("apps.example.com",))
+
+    def test_proxy_routes_reject_duplicate_host_and_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n"
+                "  logbook:\n"
+                "    image: example/logbook:latest\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                Config(
+                    service_name="svc",
+                    source_dir=src,
+                    source_kind=SourceKind.COMPOSE,
+                    access_mode=AccessMode.PUBLIC,
+                    auth_token="TokenABC123",
+                    proxy_routes=(
+                        "apps.example.com/orchestrator=orchestrator:8080",
+                        "apps.example.com/orchestrator=logbook:8010",
+                    ),
+                )
 
     def test_proxy_routes_conflict_with_single_upstream_flags(self) -> None:
         with tempfile.TemporaryDirectory() as td:

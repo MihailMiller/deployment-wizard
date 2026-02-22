@@ -18,6 +18,7 @@ from deploy_wizard.config import (
     SourceKind,
     detect_source_kind,
     find_compose_file,
+    list_compose_service_ports,
     list_compose_services,
 )
 
@@ -90,6 +91,53 @@ def _default_service_key(service_name: str) -> str:
     normalized = re.sub(r"[^a-z0-9_-]", "-", service_name.lower())
     normalized = normalized.strip("-_")
     return normalized or "service"
+
+
+def _default_route_path_segment(name: str) -> str:
+    token = re.sub(r"[^a-z0-9._~-]+", "-", name.lower()).strip("-")
+    return token or "service"
+
+
+def _format_route_spec(route) -> str:
+    if route.path_prefix == "/":
+        return f"{route.host}={route.upstream_host}:{route.upstream_port}"
+    return f"{route.host}{route.path_prefix}={route.upstream_host}:{route.upstream_port}"
+
+
+def _format_route_summary(route) -> str:
+    return f"{route.host}{route.path_prefix}->{route.upstream_host}:{route.upstream_port}"
+
+
+def _route_url_hint(route, *, tls_enabled: bool, default_domain: Optional[str]) -> str:
+    host = route.host
+    if host == "_" and default_domain is not None:
+        host = default_domain
+    if host == "_":
+        return route.path_prefix
+    scheme = "https" if tls_enabled else "http"
+    return f"{scheme}://{host}{route.path_prefix}"
+
+
+def _build_compose_path_routes(
+    *,
+    host: str,
+    services: List[str],
+    service_ports: dict,
+) -> Tuple[str, ...]:
+    routes: List[str] = []
+    used_paths = set()
+    for service in services:
+        base = f"/{_default_route_path_segment(service)}"
+        path = base
+        suffix = 2
+        while path in used_paths:
+            path = f"{base}-{suffix}"
+            suffix += 1
+        used_paths.add(path)
+        upstream_port = int(service_ports.get(service, 80))
+        route = parse_proxy_route(f"{host}{path}={service}:{upstream_port}")
+        routes.append(_format_route_spec(route))
+    return tuple(routes)
 
 
 def _port_available(bind_host: str, port: int) -> Tuple[bool, str]:
@@ -184,12 +232,20 @@ def _pick_proxy_routes(
     default_host: str,
     default_upstream: str,
     default_port: int,
+    default_path_prefix: str = "/",
 ) -> Optional[Tuple[str, ...]]:
     if not _confirm("Configure hostname-based proxy routes?", default=False):
         return None
-    print("Enter routes as <host>=<upstream>:<port>. Example: wiki.example.com=orchestrator:8090")
+    print(
+        "Enter routes as <host>[/path]=<upstream>:<port>. "
+        "Example: wiki.example.com/orchestrator=orchestrator:8090"
+    )
     routes: List[str] = []
-    default_route = f"{default_host}={default_upstream}:{default_port}"
+    default_route = (
+        f"{default_host}={default_upstream}:{default_port}"
+        if default_path_prefix == "/"
+        else f"{default_host}{default_path_prefix}={default_upstream}:{default_port}"
+    )
     while True:
         prompt_default = default_route if not routes else ""
         raw = _prompt("Proxy route", prompt_default)
@@ -198,7 +254,7 @@ def _pick_proxy_routes(
         except ValueError as exc:
             print(f"Invalid route: {exc}")
             continue
-        routes.append(f"{route.host}={route.upstream_host}:{route.upstream_port}")
+        routes.append(_format_route_spec(route))
         if not _confirm("Add another route?", default=False):
             break
     return tuple(routes)
@@ -286,6 +342,8 @@ def run_wizard() -> Config:
     ingress_mode = IngressMode.MANAGED
     compose_services: Optional[Tuple[str, ...]] = None
     discovered_services: List[str] = []
+    discovered_service_ports = {}
+    discovered_published_ports = {}
     domain: Optional[str] = None
     certbot_email: Optional[str] = None
     auth_token: Optional[str] = None
@@ -302,6 +360,11 @@ def run_wizard() -> Config:
         compose_path = find_compose_file(source_dir)
         if compose_path is not None:
             discovered_services = list_compose_services(compose_path)
+            discovered_service_ports = list_compose_service_ports(compose_path)
+            discovered_published_ports = list_compose_service_ports(
+                compose_path,
+                include_expose=False,
+            )
             if discovered_services:
                 compose_services = _choose_services(discovered_services)
 
@@ -411,17 +474,60 @@ def run_wizard() -> Config:
                 default_upstream = compose_services[0]
             elif discovered_services:
                 default_upstream = discovered_services[0]
-            default_upstream_port = 80
+            default_upstream_port = int(discovered_service_ports.get(default_upstream, 80))
         default_host = domain or "_"
-        proxy_routes = _pick_proxy_routes(
-            default_host=default_host,
-            default_upstream=default_upstream,
-            default_port=default_upstream_port,
-        )
+        default_path_prefix = "/"
+        if source_kind == SourceKind.COMPOSE:
+            selected_services = list(compose_services or discovered_services)
+            if compose_services is None and discovered_published_ports:
+                selected_services = [
+                    svc
+                    for svc in discovered_services
+                    if svc in discovered_published_ports
+                ]
+                if selected_services:
+                    print(
+                        "Routing suggestions limited to services with published host ports."
+                    )
+            if len(selected_services) > 1:
+                suggested_routes = _build_compose_path_routes(
+                    host=default_host,
+                    services=selected_services,
+                    service_ports=discovered_service_ports,
+                )
+                if suggested_routes:
+                    print(
+                        "Suggested default URLs (one path per selected service):"
+                    )
+                    for raw_route in suggested_routes:
+                        parsed_route = parse_proxy_route(raw_route)
+                        url_hint = _route_url_hint(
+                            parsed_route,
+                            tls_enabled=domain is not None,
+                            default_domain=domain,
+                        )
+                        print(
+                            f"  - {url_hint} -> "
+                            f"{parsed_route.upstream_host}:{parsed_route.upstream_port}"
+                        )
+                    if _confirm("Use these suggested /service routes?", default=True):
+                        proxy_routes = suggested_routes
+                default_path_prefix = f"/{_default_route_path_segment(default_upstream)}"
+        if proxy_routes is None:
+            proxy_routes = _pick_proxy_routes(
+                default_host=default_host,
+                default_upstream=default_upstream,
+                default_port=default_upstream_port,
+                default_path_prefix=default_path_prefix,
+            )
         if source_kind == SourceKind.COMPOSE and ingress_mode != IngressMode.MANAGED and proxy_routes is None:
             print("external-nginx/takeover with compose requires at least one hostname route.")
             routes: List[str] = []
-            default_route = f"{default_host}={default_upstream}:{default_upstream_port}"
+            default_route = (
+                f"{default_host}={default_upstream}:{default_upstream_port}"
+                if default_path_prefix == "/"
+                else f"{default_host}{default_path_prefix}={default_upstream}:{default_upstream_port}"
+            )
             while True:
                 raw = _prompt("Proxy route", default_route if not routes else "")
                 try:
@@ -429,7 +535,7 @@ def run_wizard() -> Config:
                 except ValueError as exc:
                     print(f"Invalid route: {exc}")
                     continue
-                routes.append(f"{route.host}={route.upstream_host}:{route.upstream_port}")
+                routes.append(_format_route_spec(route))
                 if not _confirm("Add another route?", default=False):
                     break
             proxy_routes = tuple(routes)
@@ -507,7 +613,7 @@ def run_wizard() -> Config:
         )
     if cfg.proxy_routes:
         rendered = ", ".join(
-            f"{r.host}->{r.upstream_host}:{r.upstream_port}"
+            _format_route_summary(r)
             for r in cfg.proxy_routes
         )
         print(f"  Proxy routes : {rendered}")

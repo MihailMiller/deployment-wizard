@@ -169,6 +169,128 @@ def write_proxy_compose(cfg: Config) -> None:
     write_file(cfg.managed_proxy_compose_path, content)
 
 
+def _group_routes_by_host(routes) -> list:
+    grouped = {}
+    order = []
+    for route in routes:
+        if route.host not in grouped:
+            grouped[route.host] = []
+            order.append(route.host)
+        grouped[route.host].append(route)
+    return [(host, grouped[host]) for host in order]
+
+
+def _render_route_locations(routes, auth_guard: str) -> str:
+    blocks = []
+    for route in routes:
+        if route.path_prefix == "/":
+            blocks.append(
+                (
+                    "    location / {\n"
+                    f"{auth_guard}"
+                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
+                    "        proxy_http_version 1.1;\n"
+                    "        proxy_set_header Host $host;\n"
+                    "        proxy_set_header X-Real-IP $remote_addr;\n"
+                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                    "    }\n"
+                )
+            )
+            continue
+        prefix = route.path_prefix
+        blocks.append(
+            (
+                f"    location = {prefix} {{\n"
+                f"        return 301 {prefix}/;\n"
+                "    }\n"
+                "\n"
+                f"    location ^~ {prefix}/ {{\n"
+                f"{auth_guard}"
+                f"        proxy_pass http://{route.upstream_host}:{route.upstream_port}/;\n"
+                "        proxy_http_version 1.1;\n"
+                "        proxy_set_header Host $host;\n"
+                "        proxy_set_header X-Real-IP $remote_addr;\n"
+                "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                "        proxy_set_header X-Forwarded-Prefix "
+                f"{prefix};\n"
+                "    }\n"
+            )
+        )
+    return "\n".join(blocks).rstrip() + "\n"
+
+
+def _render_http_proxy_server(host: str, routes, auth_guard: str, *, acme_root: str = "") -> str:
+    parts = [
+        "server {\n",
+        "    listen 80;\n",
+        f"    server_name {host};\n",
+        "\n",
+    ]
+    if acme_root:
+        parts.extend(
+            [
+                "    location /.well-known/acme-challenge/ {\n",
+                f"        root {acme_root};\n",
+                "    }\n",
+                "\n",
+            ]
+        )
+    parts.append(_render_route_locations(routes, auth_guard))
+    parts.append("}\n")
+    return "".join(parts)
+
+
+def _render_http_redirect_server(host: str, *, acme_root: str = "") -> str:
+    parts = [
+        "server {\n",
+        "    listen 80;\n",
+        f"    server_name {host};\n",
+        "\n",
+    ]
+    if acme_root:
+        parts.extend(
+            [
+                "    location /.well-known/acme-challenge/ {\n",
+                f"        root {acme_root};\n",
+                "    }\n",
+                "\n",
+            ]
+        )
+    parts.extend(
+        [
+            "    location / {\n",
+            "        return 301 https://$host$request_uri;\n",
+            "    }\n",
+            "}\n",
+        ]
+    )
+    return "".join(parts)
+
+
+def _render_https_proxy_server(
+    host: str,
+    routes,
+    auth_guard: str,
+    *,
+    cert_base_domain: str,
+) -> str:
+    return (
+        "server {\n"
+        "    listen 443 ssl;\n"
+        f"    server_name {host};\n"
+        "\n"
+        f"    ssl_certificate /etc/letsencrypt/live/{cert_base_domain}/fullchain.pem;\n"
+        f"    ssl_certificate_key /etc/letsencrypt/live/{cert_base_domain}/privkey.pem;\n"
+        "    ssl_protocols TLSv1.2 TLSv1.3;\n"
+        "    ssl_prefer_server_ciphers on;\n"
+        "\n"
+        f"{_render_route_locations(routes, auth_guard)}"
+        "}\n"
+    )
+
+
 def write_nginx_proxy_config(cfg: Config, *, https_enabled: bool) -> None:
     if not cfg.uses_managed_ingress:
         return
@@ -181,93 +303,44 @@ def write_nginx_proxy_config(cfg: Config, *, https_enabled: bool) -> None:
             "            return 401;\n"
             "        }\n"
         )
-    route_blocks = []
+    grouped = _group_routes_by_host(routes)
+    blocks = []
     if not cfg.tls_enabled:
-        for route in routes:
-            route_blocks.append(
-                (
-                    "server {\n"
-                    "    listen 80;\n"
-                    f"    server_name {route.host};\n"
-                    "\n"
-                    "    location / {\n"
-                    f"{auth_guard}"
-                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
-                    "        proxy_http_version 1.1;\n"
-                    "        proxy_set_header Host $host;\n"
-                    "        proxy_set_header X-Real-IP $remote_addr;\n"
-                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-                    "    }\n"
-                    "}\n"
+        for host, host_routes in grouped:
+            blocks.append(
+                _render_http_proxy_server(
+                    host,
+                    host_routes,
+                    auth_guard,
                 )
             )
     elif not https_enabled:
-        for route in routes:
-            route_blocks.append(
-                (
-                    "server {\n"
-                    "    listen 80;\n"
-                    f"    server_name {route.host};\n"
-                    "\n"
-                    "    location /.well-known/acme-challenge/ {\n"
-                    "        root /var/www/certbot;\n"
-                    "    }\n"
-                    "\n"
-                    "    location / {\n"
-                    f"{auth_guard}"
-                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
-                    "        proxy_http_version 1.1;\n"
-                    "        proxy_set_header Host $host;\n"
-                    "        proxy_set_header X-Real-IP $remote_addr;\n"
-                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-                    "    }\n"
-                    "}\n"
+        for host, host_routes in grouped:
+            blocks.append(
+                _render_http_proxy_server(
+                    host,
+                    host_routes,
+                    auth_guard,
+                    acme_root="/var/www/certbot",
                 )
             )
     else:
-        for route in routes:
-            route_blocks.append(
-                (
-                    "server {\n"
-                    "    listen 80;\n"
-                    f"    server_name {route.host};\n"
-                    "\n"
-                    "    location /.well-known/acme-challenge/ {\n"
-                    "        root /var/www/certbot;\n"
-                    "    }\n"
-                    "\n"
-                    "    location / {\n"
-                    "        return 301 https://$host$request_uri;\n"
-                    "    }\n"
-                    "}\n"
+        for host, host_routes in grouped:
+            blocks.append(
+                _render_http_redirect_server(
+                    host,
+                    acme_root="/var/www/certbot",
                 )
             )
-            route_blocks.append(
-                (
-                    "server {\n"
-                    "    listen 443 ssl;\n"
-                    f"    server_name {route.host};\n"
-                    "\n"
-                    f"    ssl_certificate /etc/letsencrypt/live/{cert_base_domain}/fullchain.pem;\n"
-                    f"    ssl_certificate_key /etc/letsencrypt/live/{cert_base_domain}/privkey.pem;\n"
-                    "    ssl_protocols TLSv1.2 TLSv1.3;\n"
-                    "    ssl_prefer_server_ciphers on;\n"
-                    "\n"
-                    "    location / {\n"
-                    f"{auth_guard}"
-                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
-                    "        proxy_http_version 1.1;\n"
-                    "        proxy_set_header Host $host;\n"
-                    "        proxy_set_header X-Real-IP $remote_addr;\n"
-                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-                    "    }\n"
-                    "}\n"
+            blocks.append(
+                _render_https_proxy_server(
+                    host,
+                    host_routes,
+                    auth_guard,
+                    cert_base_domain=cert_base_domain,
                 )
             )
-    content = "\n".join(route_blocks) + "\n"
+    content = "\n".join(blocks) + "\n"
     write_file(cfg.managed_nginx_conf_path, content)
 
 
@@ -339,6 +412,7 @@ def _reload_nginx(cfg: Config) -> None:
 
 def _render_host_nginx_config(cfg: Config, *, https_enabled: bool) -> str:
     routes = cfg.effective_proxy_routes
+    grouped = _group_routes_by_host(routes)
     auth_guard = ""
     if cfg.auth_token is not None:
         auth_guard = (
@@ -348,23 +422,12 @@ def _render_host_nginx_config(cfg: Config, *, https_enabled: bool) -> str:
         )
     if not cfg.tls_enabled:
         blocks = []
-        for route in routes:
+        for host, host_routes in grouped:
             blocks.append(
-                (
-                    "server {\n"
-                    "    listen 80;\n"
-                    f"    server_name {route.host};\n"
-                    "\n"
-                    "    location / {\n"
-                    f"{auth_guard}"
-                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
-                    "        proxy_http_version 1.1;\n"
-                    "        proxy_set_header Host $host;\n"
-                    "        proxy_set_header X-Real-IP $remote_addr;\n"
-                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-                    "    }\n"
-                    "}\n"
+                _render_http_proxy_server(
+                    host,
+                    host_routes,
+                    auth_guard,
                 )
             )
         return "\n".join(blocks) + "\n"
@@ -373,69 +436,30 @@ def _render_host_nginx_config(cfg: Config, *, https_enabled: bool) -> str:
     cert_base = cfg.cert_domain_names[0] if cfg.cert_domain_names else (cfg.domain or "")
     blocks = []
     if not https_enabled:
-        for route in routes:
+        for host, host_routes in grouped:
             blocks.append(
-                (
-                    "server {\n"
-                    "    listen 80;\n"
-                    f"    server_name {route.host};\n"
-                    "\n"
-                    "    location /.well-known/acme-challenge/ {\n"
-                    f"        root {webroot};\n"
-                    "    }\n"
-                    "\n"
-                    "    location / {\n"
-                    f"{auth_guard}"
-                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
-                    "        proxy_http_version 1.1;\n"
-                    "        proxy_set_header Host $host;\n"
-                    "        proxy_set_header X-Real-IP $remote_addr;\n"
-                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-                    "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-                    "    }\n"
-                    "}\n"
+                _render_http_proxy_server(
+                    host,
+                    host_routes,
+                    auth_guard,
+                    acme_root=str(webroot),
                 )
             )
         return "\n".join(blocks) + "\n"
 
-    for route in routes:
+    for host, host_routes in grouped:
         blocks.append(
-            (
-                "server {\n"
-                "    listen 80;\n"
-                f"    server_name {route.host};\n"
-                "\n"
-                "    location /.well-known/acme-challenge/ {\n"
-                f"        root {webroot};\n"
-                "    }\n"
-                "\n"
-                "    location / {\n"
-                "        return 301 https://$host$request_uri;\n"
-                "    }\n"
-                "}\n"
+            _render_http_redirect_server(
+                host,
+                acme_root=str(webroot),
             )
         )
         blocks.append(
-            (
-                "server {\n"
-                "    listen 443 ssl;\n"
-                f"    server_name {route.host};\n"
-                "\n"
-                f"    ssl_certificate /etc/letsencrypt/live/{cert_base}/fullchain.pem;\n"
-                f"    ssl_certificate_key /etc/letsencrypt/live/{cert_base}/privkey.pem;\n"
-                "    ssl_protocols TLSv1.2 TLSv1.3;\n"
-                "    ssl_prefer_server_ciphers on;\n"
-                "\n"
-                "    location / {\n"
-                f"{auth_guard}"
-                f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
-                "        proxy_http_version 1.1;\n"
-                "        proxy_set_header Host $host;\n"
-                "        proxy_set_header X-Real-IP $remote_addr;\n"
-                "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-                "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-                "    }\n"
-                "}\n"
+            _render_https_proxy_server(
+                host,
+                host_routes,
+                auth_guard,
+                cert_base_domain=cert_base,
             )
         )
     return "\n".join(blocks) + "\n"

@@ -310,6 +310,40 @@ class DeployWizardServiceTests(unittest.TestCase):
                 nginx_content,
             )
 
+    def test_write_nginx_proxy_config_with_path_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  workflow-studio:\n"
+                "    image: example/workflow-studio:latest\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                base_dir=Path(td) / "services",
+                access_mode=AccessMode.PUBLIC,
+                auth_token="TokenABC123",
+                proxy_routes=(
+                    "apps.example.com/workflow-studio=workflow-studio:8000",
+                    "apps.example.com/orchestrator=orchestrator:8080",
+                ),
+            )
+            write_proxy_compose(cfg)
+            write_nginx_proxy_config(cfg, https_enabled=False)
+            nginx_content = cfg.managed_nginx_conf_path.read_text(encoding="utf-8")
+            self.assertIn("server_name apps.example.com;", nginx_content)
+            self.assertIn("location = /workflow-studio {", nginx_content)
+            self.assertIn("location ^~ /workflow-studio/ {", nginx_content)
+            self.assertIn("proxy_pass http://workflow-studio:8000/;", nginx_content)
+            self.assertIn("location = /orchestrator {", nginx_content)
+            self.assertIn("location ^~ /orchestrator/ {", nginx_content)
+            self.assertIn("proxy_pass http://orchestrator:8080/;", nginx_content)
+
     def test_issue_certificate_includes_route_domains(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             src = Path(td)
@@ -360,6 +394,39 @@ class DeployWizardServiceTests(unittest.TestCase):
                 "ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;",
                 content,
             )
+
+    def test_render_host_nginx_config_external_tls_path_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  workflow-studio:\n"
+                "    image: example/workflow-studio:latest\n"
+                "  orchestrator:\n"
+                "    image: example/orchestrator:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                access_mode=AccessMode.PUBLIC,
+                ingress_mode=IngressMode.EXTERNAL_NGINX,
+                domain="apps.example.com",
+                certbot_email="ops@example.com",
+                proxy_routes=(
+                    "apps.example.com/workflow-studio=workflow-studio:8000",
+                    "apps.example.com/orchestrator=orchestrator:8080",
+                ),
+            )
+            content = _render_host_nginx_config(cfg, https_enabled=True)
+            self.assertIn("server_name apps.example.com;", content)
+            self.assertIn("location = /workflow-studio {", content)
+            self.assertIn("location ^~ /workflow-studio/ {", content)
+            self.assertIn("proxy_pass http://workflow-studio:8000/;", content)
+            self.assertIn("location = /orchestrator {", content)
+            self.assertIn("location ^~ /orchestrator/ {", content)
+            self.assertIn("proxy_pass http://orchestrator:8080/;", content)
 
 
 if __name__ == "__main__":

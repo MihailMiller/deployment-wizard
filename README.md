@@ -63,7 +63,7 @@ Key flags:
 - `--auth-token` (enable bearer-token auth at managed proxy)
 - `--domain` + `--certbot-email` (enable nginx + certbot)
 - `--proxy-http-port` + `--proxy-https-port` (external nginx bind ports)
-- `--proxy-route HOST=UPSTREAM:PORT` (repeat for multi-host routing)
+- `--proxy-route HOST[/PATH]=UPSTREAM:PORT` (repeat for multi-host/path routing)
 - `--proxy-upstream-service` (compose sources)
 - `--proxy-upstream-port`
 
@@ -74,7 +74,7 @@ Notes:
 - `--ingress-mode external-nginx` writes and reloads a host nginx site.
 - `--ingress-mode takeover` stops host nginx before reconfigure and starts it again.
 - Interactive mode auto-selects free proxy ports (prefers 80/443) and only falls back to manual entry if needed.
-- Interactive mode auto-selects a proxy upstream from discovered compose services unless you configure advanced `--proxy-route` entries.
+- Interactive mode suggests default routes from selected compose services; when deploying all compose services, it only auto-suggests routes for services with published host `ports:`.
 - For public TLS in interactive mode, the wizard requires host ports `80/443` by default and asks before switching to non-standard ports.
 
 TLS reverse proxy example:
@@ -113,6 +113,21 @@ sudo python -m deploy_wizard deploy --batch \
   --proxy-route wiki.example.com=orchestrator:8090 \
   --proxy-route sickbeard.example.com=media:8081 \
   --proxy-route mail.example.com=mailer:4000
+```
+
+Single host, multi-service path routes example:
+
+```bash
+sudo python -m deploy_wizard deploy --batch \
+  --service-name llm-stack \
+  --source-dir /path/to/compose-source \
+  --source-kind compose \
+  --access-mode public \
+  --domain apps.example.com \
+  --certbot-email ops@example.com \
+  --proxy-route apps.example.com/workflow-studio=workflow-studio:8000 \
+  --proxy-route apps.example.com/orchestrator=orchestrator:8080 \
+  --proxy-route apps.example.com/logbook=logbook:8010
 ```
 
 Host nginx integration example (no dockerized nginx):
