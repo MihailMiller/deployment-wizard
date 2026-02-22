@@ -41,6 +41,25 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
         metavar="HOST",
         help="Host bind address used with generated compose port mappings.",
     )
+    parser.add_argument(
+        "--registry-retries",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Retry attempts for docker compose pull/build/up operations. (default: 4)",
+    )
+    parser.add_argument(
+        "--retry-backoff-seconds",
+        type=int,
+        default=5,
+        metavar="SEC",
+        help="Initial retry backoff for registry/network errors. (default: 5)",
+    )
+    parser.add_argument(
+        "--no-docker-daemon-tuning",
+        action="store_true",
+        help="Skip docker daemon network hardening for flaky registry connections.",
+    )
 
     raw = parser.parse_args(argv)
     try:
@@ -52,6 +71,9 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
             host_port=raw.host_port,
             container_port=raw.container_port,
             bind_host=raw.bind_host,
+            registry_retries=raw.registry_retries,
+            retry_backoff_seconds=raw.retry_backoff_seconds,
+            tune_docker_daemon=not raw.no_docker_daemon_tuning,
         )
     except ValueError as exc:
         parser.error(str(exc))

@@ -55,6 +55,9 @@ class Config:
     host_port: Optional[int] = None
     container_port: Optional[int] = None
     bind_host: str = "127.0.0.1"
+    registry_retries: int = 4
+    retry_backoff_seconds: int = 5
+    tune_docker_daemon: bool = True
 
     def __post_init__(self) -> None:
         if not _SERVICE_NAME_RE.fullmatch(self.service_name):
@@ -90,6 +93,11 @@ class Config:
 
         if not self.bind_host.strip():
             raise ValueError("bind_host must not be empty.")
+
+        if self.registry_retries < 1:
+            raise ValueError("registry_retries must be >= 1.")
+        if self.retry_backoff_seconds < 1:
+            raise ValueError("retry_backoff_seconds must be >= 1.")
 
     @property
     def service_dir(self) -> Path:

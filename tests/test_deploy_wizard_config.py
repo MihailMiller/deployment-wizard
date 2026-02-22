@@ -46,6 +46,20 @@ class DeployWizardConfigTests(unittest.TestCase):
             cfg = Config(service_name="My.Service", source_dir=src)
             self.assertEqual(cfg.compose_project_name, "my-service")
 
+    def test_registry_retries_must_be_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                Config(service_name="svc", source_dir=src, registry_retries=0)
+
+    def test_retry_backoff_seconds_must_be_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                Config(service_name="svc", source_dir=src, retry_backoff_seconds=0)
+
 
 if __name__ == "__main__":
     unittest.main()

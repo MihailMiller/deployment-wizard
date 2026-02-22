@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 LOG_PATH = Path("/var/log/deploy_wizard.log")
+FALLBACK_LOG_PATH = Path("./deploy_wizard.log")
 
 REDACT_PATTERNS = [
     re.compile(r"(Authorization:\s*Bearer\s+)[^\s\"']+", re.IGNORECASE),
@@ -28,9 +29,19 @@ def redact(s: str) -> str:
 
 
 def log_line(s: str) -> None:
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with LOG_PATH.open("a", encoding="utf-8") as f:
-        f.write(s + "\n")
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(s + "\n")
+        return
+    except Exception:
+        pass
+    try:
+        with FALLBACK_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(s + "\n")
+    except Exception:
+        # Logging must never break deployment flow.
+        return
 
 
 def die(msg: str, code: int = 1) -> None:

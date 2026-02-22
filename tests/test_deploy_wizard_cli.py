@@ -60,6 +60,7 @@ class DeployWizardCliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertIn("--service-name", proc.stdout)
         self.assertIn("--source-dir", proc.stdout)
+        self.assertIn("--registry-retries", proc.stdout)
 
 
 if __name__ == "__main__":

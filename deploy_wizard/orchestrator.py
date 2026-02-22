@@ -75,6 +75,7 @@ def run_deploy(cfg) -> None:
         detect_ubuntu,
         ensure_base_packages,
         ensure_docker,
+        ensure_docker_daemon_tuning,
         require_root_reexec,
     )
 
@@ -90,6 +91,11 @@ def run_deploy(cfg) -> None:
         steps: List[Step] = [
             Step("Install base packages", ensure_base_packages),
             Step("Install/verify Docker", ensure_docker),
+            Step(
+                "Harden Docker registry network settings",
+                ensure_docker_daemon_tuning,
+                skip_if=lambda: not cfg.tune_docker_daemon,
+            ),
             Step("Deploy service", lambda: deploy_service(cfg)),
         ]
         with tqdm(total=len(steps), desc="Deploying service", unit="step") as bar:
@@ -109,6 +115,8 @@ def _print_summary(cfg) -> None:
     print(f"Source dir   : {cfg.source_dir}")
     print(f"Source kind  : {cfg.source_kind.value}")
     print(f"Project dir  : {cfg.service_dir}")
+    print(f"Retries      : {cfg.registry_retries} (backoff {cfg.retry_backoff_seconds}s)")
+    print(f"Docker tune  : {'enabled' if cfg.tune_docker_daemon else 'disabled'}")
     if cfg.source_kind.value == "dockerfile":
         print(f"Compose file : {cfg.managed_compose_path}")
     else:

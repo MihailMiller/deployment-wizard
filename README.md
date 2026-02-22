@@ -12,6 +12,8 @@ It deploys a service from a local directory that contains either:
 - Service-name based deployment isolation via Docker Compose project names
 - Auto-detect compose vs Dockerfile sources
 - Idempotent host bootstrap for Ubuntu + Docker
+- Automatic retry for transient Docker registry/network failures
+- Docker daemon network tuning to reduce `connection reset by peer` pull errors
 
 ## Quick Start
 
@@ -48,6 +50,19 @@ Key flags:
 - `--base-dir`
 - `--host-port` + `--container-port` (for Dockerfile mode)
 - `--bind-host`
+- `--registry-retries`
+- `--retry-backoff-seconds`
+- `--no-docker-daemon-tuning`
+
+## Network Hardening
+
+By default, deployment writes Docker daemon settings to improve pull reliability:
+
+- `max-concurrent-downloads = 1`
+- `max-concurrent-uploads = 1`
+- fallback DNS: `1.1.1.1`, `8.8.8.8` (only if DNS is not already configured)
+
+You can disable this behavior with `--no-docker-daemon-tuning`.
 
 ## Development
 
