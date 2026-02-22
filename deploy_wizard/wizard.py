@@ -18,6 +18,7 @@ from deploy_wizard.config import (
     SourceKind,
     detect_source_kind,
     find_compose_file,
+    list_missing_compose_env_vars,
     list_compose_service_host_ports,
     list_compose_service_ports,
     list_compose_services,
@@ -386,6 +387,80 @@ def _pick_source_dir() -> Tuple[Path, SourceKind]:
             pass
 
 
+def _dotenv_quote(value: str) -> str:
+    text = str(value)
+    if re.fullmatch(r"[A-Za-z0-9_./:@+\-]+", text):
+        return text
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _upsert_dotenv_values(dotenv_path: Path, pairs: List[Tuple[str, str]]) -> None:
+    updates = {key: value for key, value in pairs}
+    lines: List[str] = []
+    if dotenv_path.exists() and dotenv_path.is_file():
+        lines = dotenv_path.read_text(encoding="utf-8").splitlines()
+
+    remaining = dict(updates)
+    rendered: List[str] = []
+    for raw in lines:
+        line = raw.rstrip("\n")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            rendered.append(line)
+            continue
+
+        candidate = stripped
+        prefix = ""
+        if candidate.startswith("export "):
+            prefix = "export "
+            candidate = candidate[len("export ") :].strip()
+        key_raw, _value_raw = candidate.split("=", 1)
+        key = key_raw.strip()
+        if key in remaining:
+            rendered.append(f"{prefix}{key}={_dotenv_quote(remaining.pop(key))}")
+        else:
+            rendered.append(line)
+
+    if remaining:
+        if rendered and rendered[-1].strip():
+            rendered.append("")
+        for key, value in pairs:
+            if key in remaining:
+                rendered.append(f"{key}={_dotenv_quote(value)}")
+                remaining.pop(key)
+
+    dotenv_path.write_text("\n".join(rendered) + "\n", encoding="utf-8")
+
+
+def _collect_missing_compose_env(compose_path: Path) -> None:
+    missing = list_missing_compose_env_vars(
+        compose_path,
+        dotenv_path=compose_path.parent / ".env",
+        env={},
+    )
+    if not missing:
+        return
+
+    print("Compose file uses variables that are currently unset or empty:")
+    print("  " + ", ".join(name for name, _requires_non_empty in missing))
+    print("Provide values now; they will be written to .env in the source directory.")
+
+    updates: List[Tuple[str, str]] = []
+    for name, _requires_non_empty in missing:
+        while True:
+            value = _prompt(f"Value for {name}", "")
+            if value == "":
+                print("Value must not be empty.")
+                continue
+            updates.append((name, value))
+            break
+
+    dotenv_path = compose_path.parent / ".env"
+    _upsert_dotenv_values(dotenv_path, updates)
+    print(f"Wrote {len(updates)} variable(s) to {dotenv_path}.")
+
+
 def run_wizard() -> Config:
     print()
     print("Generic Service Deployment Wizard")
@@ -430,6 +505,7 @@ def run_wizard() -> Config:
             discovered_host_ports = list_compose_service_host_ports(compose_path)
             if discovered_services:
                 compose_services = _choose_services(discovered_services)
+            _collect_missing_compose_env(compose_path)
 
     if source_kind == SourceKind.DOCKERFILE:
         if _confirm("Expose a host port for this service?", default=False):

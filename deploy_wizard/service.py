@@ -12,7 +12,13 @@ from pathlib import Path
 from shlex import quote
 from typing import Tuple
 
-from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind
+from deploy_wizard.config import (
+    AccessMode,
+    Config,
+    IngressMode,
+    SourceKind,
+    list_missing_compose_env_vars,
+)
 from deploy_wizard.log import die, log_line, sh
 
 
@@ -666,6 +672,18 @@ def deploy_compose_source(cfg: Config) -> None:
     compose_path = cfg.source_compose_path
     if compose_path is None:
         raise ValueError("Compose source deployment requires a compose file.")
+    missing_env = list_missing_compose_env_vars(
+        compose_path,
+        dotenv_path=cfg.source_dir / ".env",
+    )
+    if missing_env:
+        names = ", ".join(name for name, _requires_non_empty in missing_env)
+        die(
+            "Compose file has unset/empty interpolation variables: "
+            f"{names}. "
+            f"Set them in {cfg.source_dir / '.env'} "
+            "or export them before running deployment (sudo may drop shell env vars)."
+        )
     services = []
     if cfg.compose_services:
         services.extend(cfg.compose_services)

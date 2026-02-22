@@ -12,6 +12,7 @@ It deploys a service from a local directory that contains either:
 - Service-name based deployment isolation via Docker Compose project names
 - Auto-detect compose vs Dockerfile sources
 - Compose service multi-select (deploy all or chosen services)
+- Compose env-var preflight for `${VAR}` interpolation (wizard prompts and writes missing values to `.env`)
 - Access modes: `localhost`, `tailscale`, `public`
 - Optional bearer-token authentication at managed nginx proxy
 - Optional nginx reverse proxy with Let's Encrypt (certbot)
@@ -69,6 +70,7 @@ Key flags:
 
 Notes:
 - For compose sources, `--access-mode` values other than `localhost` require proxy mode (`--domain` or `--auth-token`).
+- For compose sources, required interpolation vars must be set (prefer `source-dir/.env`; shell env may be dropped by `sudo`).
 - `--domain` (Let's Encrypt HTTP-01) requires `--access-mode public`.
 - `--ingress-mode managed` keeps nginx+certbot inside Docker (default).
 - `--ingress-mode external-nginx` writes and reloads a host nginx site.

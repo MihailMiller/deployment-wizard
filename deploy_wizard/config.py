@@ -4,11 +4,12 @@ Immutable configuration for generic Docker microservice deployment.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 
 class SourceKind(str, Enum):
@@ -38,6 +39,7 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+\-]{8,}$")
 _SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9*_.-]+$")
 _UPSTREAM_HOST_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _PATH_PREFIX_RE = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@%/\-]*$")
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,155 @@ def parse_proxy_route(raw: str) -> ProxyRoute:
         upstream_port=port,
         path_prefix=path_prefix,
     )
+
+
+def _merge_env_requirement(
+    name: str,
+    level: int,
+    *,
+    order: List[str],
+    levels: Dict[str, int],
+) -> None:
+    if not _ENV_VAR_NAME_RE.fullmatch(name):
+        return
+    if name not in levels:
+        order.append(name)
+        levels[name] = level
+        return
+    levels[name] = max(levels[name], level)
+
+
+def _parse_braced_env_requirement(expr: str) -> Optional[Tuple[str, int]]:
+    text = str(expr).strip()
+    if not text:
+        return None
+    match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?]).*)?$", text)
+    if match is None:
+        return None
+    name = match.group(1)
+    op = match.group(2)
+    if op in ("-", ":-", "+", ":+"):
+        # Has default/alternative; no value is required.
+        return None
+    if op == ":?":
+        return (name, 2)
+    return (name, 1)
+
+
+def list_compose_required_env_vars(compose_path: Path) -> Tuple[Tuple[str, bool], ...]:
+    """
+    Discover interpolation variables in compose files that require user-provided values.
+
+    Returns tuples of (NAME, require_non_empty), preserving first-seen order.
+    """
+    if not compose_path.exists() or not compose_path.is_file():
+        return tuple()
+
+    content = compose_path.read_text(encoding="utf-8")
+    required_order: List[str] = []
+    required_levels: Dict[str, int] = {}
+    idx = 0
+
+    while idx < len(content):
+        if content[idx] != "$":
+            idx += 1
+            continue
+        if idx + 1 >= len(content):
+            break
+
+        nxt = content[idx + 1]
+        if nxt == "$":
+            # Escaped dollar sign (literal).
+            idx += 2
+            continue
+        if nxt == "{":
+            end = content.find("}", idx + 2)
+            if end < 0:
+                idx += 1
+                continue
+            parsed = _parse_braced_env_requirement(content[idx + 2:end])
+            if parsed is not None:
+                name, level = parsed
+                _merge_env_requirement(
+                    name,
+                    level,
+                    order=required_order,
+                    levels=required_levels,
+                )
+            idx = end + 1
+            continue
+
+        name_match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", content[idx + 1 :])
+        if name_match is not None:
+            _merge_env_requirement(
+                name_match.group(0),
+                1,
+                order=required_order,
+                levels=required_levels,
+            )
+            idx += 1 + len(name_match.group(0))
+            continue
+
+        idx += 1
+
+    return tuple((name, required_levels[name] >= 2) for name in required_order)
+
+
+def read_dotenv_values(dotenv_path: Path) -> Dict[str, str]:
+    """
+    Read KEY=VALUE entries from a .env-like file.
+    """
+    if not dotenv_path.exists() or not dotenv_path.is_file():
+        return {}
+
+    values: Dict[str, str] = {}
+    for raw in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key_raw, value_raw = line.split("=", 1)
+        key = key_raw.strip()
+        if not _ENV_VAR_NAME_RE.fullmatch(key):
+            continue
+        value = value_raw.strip()
+        if len(value) >= 2 and (
+            (value.startswith('"') and value.endswith('"'))
+            or (value.startswith("'") and value.endswith("'"))
+        ):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def list_missing_compose_env_vars(
+    compose_path: Path,
+    *,
+    dotenv_path: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> Tuple[Tuple[str, bool], ...]:
+    """
+    Return required compose variables that are unset/empty.
+    """
+    required = list_compose_required_env_vars(compose_path)
+    if not required:
+        return tuple()
+
+    merged: Dict[str, str] = {}
+    if dotenv_path is not None:
+        merged.update(read_dotenv_values(dotenv_path))
+    source_env = os.environ if env is None else env
+    merged.update({str(k): str(v) for k, v in source_env.items()})
+
+    missing: List[Tuple[str, bool]] = []
+    for name, require_non_empty in required:
+        value = merged.get(name)
+        if value is None or value == "":
+            missing.append((name, require_non_empty))
+    return tuple(missing)
 
 
 def find_compose_file(source_dir: Path) -> Optional[Path]:

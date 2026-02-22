@@ -7,6 +7,9 @@ from deploy_wizard.config import (
     Config,
     IngressMode,
     SourceKind,
+    list_compose_required_env_vars,
+    list_missing_compose_env_vars,
+    read_dotenv_values,
     list_compose_service_host_ports,
     list_compose_service_ports,
     list_compose_services,
@@ -14,6 +17,80 @@ from deploy_wizard.config import (
 
 
 class DeployWizardConfigTests(unittest.TestCase):
+    def test_list_compose_required_env_vars_detects_required_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            compose = src / "docker-compose.yml"
+            compose.write_text(
+                "services:\n"
+                "  api:\n"
+                "    image: ${IMAGE_NAME}\n"
+                "    environment:\n"
+                "      - MAYBE=$MAYBE\n"
+                "      - OPTIONAL_A=${HF_TOKEN:-}\n"
+                "      - OPTIONAL_B=${WITH_DEFAULT-default}\n"
+                "      - STRICT=${AUTH_TOKEN:?auth required}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                list_compose_required_env_vars(compose),
+                (
+                    ("IMAGE_NAME", False),
+                    ("MAYBE", False),
+                    ("AUTH_TOKEN", True),
+                ),
+            )
+
+    def test_list_missing_compose_env_vars_respects_dotenv_and_env(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            compose = src / "docker-compose.yml"
+            compose.write_text(
+                "services:\n"
+                "  llm:\n"
+                "    image: ${LLM_IMAGE}\n"
+                "    environment:\n"
+                "      - HF_TOKEN=${HF_TOKEN:-}\n"
+                "      - AUTH_TOKEN=${AUTH_TOKEN:?required}\n",
+                encoding="utf-8",
+            )
+            (src / ".env").write_text(
+                "LLM_IMAGE=ghcr.io/example/llm:latest\n"
+                "AUTH_TOKEN=\n",
+                encoding="utf-8",
+            )
+            missing = list_missing_compose_env_vars(
+                compose,
+                dotenv_path=src / ".env",
+                env={},
+            )
+            self.assertEqual(missing, (("AUTH_TOKEN", True),))
+            missing_with_env = list_missing_compose_env_vars(
+                compose,
+                dotenv_path=src / ".env",
+                env={"AUTH_TOKEN": "TokenABC123"},
+            )
+            self.assertEqual(missing_with_env, tuple())
+
+    def test_read_dotenv_values_supports_export_and_quotes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            env_path = Path(td) / ".env"
+            env_path.write_text(
+                "PLAIN=value\n"
+                "export QUOTED=\"space value\"\n"
+                "SINGLE='abc'\n"
+                "# comment\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                read_dotenv_values(env_path),
+                {
+                    "PLAIN": "value",
+                    "QUOTED": "space value",
+                    "SINGLE": "abc",
+                },
+            )
+
     def test_auto_detects_compose(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             src = Path(td)

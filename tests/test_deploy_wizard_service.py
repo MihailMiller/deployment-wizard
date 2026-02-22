@@ -127,6 +127,47 @@ class DeployWizardServiceTests(unittest.TestCase):
         cmd = run_mock.call_args[0][0]
         self.assertIn(" up -d --build api worker", cmd)
 
+    def test_deploy_compose_source_missing_env_vars_fails_fast(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  llm:\n"
+                "    image: ${LLM_IMAGE}\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+            )
+            with mock.patch("deploy_wizard.service.die", side_effect=RuntimeError("die")) as die_mock, \
+                 mock.patch("deploy_wizard.service._run_with_retries") as run_mock:
+                with self.assertRaises(RuntimeError):
+                    deploy_compose_source(cfg)
+            run_mock.assert_not_called()
+            msg = die_mock.call_args[0][0]
+            self.assertIn("LLM_IMAGE", msg)
+
+    def test_deploy_compose_source_uses_dotenv_for_required_vars(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  llm:\n"
+                "    image: ${LLM_IMAGE}\n",
+                encoding="utf-8",
+            )
+            (src / ".env").write_text("LLM_IMAGE=ghcr.io/example/llm:latest\n", encoding="utf-8")
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+            )
+            with mock.patch("deploy_wizard.service._run_with_retries", return_value=True) as run_mock:
+                deploy_compose_source(cfg)
+            self.assertTrue(run_mock.called)
+
     def test_deploy_compose_source_external_nginx_configures_host_ingress(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             src = Path(td)
