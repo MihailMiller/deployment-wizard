@@ -9,8 +9,41 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any, List
 
 from deploy_wizard.log import die, log_line, sh
+
+_FALLBACK_DNS = ("1.1.1.1", "8.8.8.8")
+
+
+def _is_loopback_dns(value: str) -> bool:
+    return value.startswith("127.") or value in ("::1", "0.0.0.0")
+
+
+def _normalize_dns_entries(raw: Any) -> List[str]:
+    if raw is None:
+        values: List[Any] = []
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        values = [raw]
+
+    out: List[str] = []
+    for item in values:
+        value = str(item).strip()
+        if not value or _is_loopback_dns(value):
+            continue
+        if value not in out:
+            out.append(value)
+    return out
+
+
+def _merged_dns(raw: Any) -> List[str]:
+    merged = _normalize_dns_entries(raw)
+    for fallback in _FALLBACK_DNS:
+        if fallback not in merged:
+            merged.append(fallback)
+    return merged
 
 
 def require_root_reexec() -> None:
@@ -58,7 +91,7 @@ def ensure_docker_daemon_tuning() -> None:
     Tune Docker daemon for unstable registry connections.
 
     - Limit concurrent downloads/uploads to reduce connection resets.
-    - Set fallback DNS servers when none are configured.
+    - Ensure safe, non-loopback DNS resolvers are configured.
     """
     daemon_path = Path("/etc/docker/daemon.json")
     current: dict = {}
@@ -72,8 +105,7 @@ def ensure_docker_daemon_tuning() -> None:
     merged = dict(current)
     merged["max-concurrent-downloads"] = 1
     merged["max-concurrent-uploads"] = 1
-    if not merged.get("dns"):
-        merged["dns"] = ["1.1.1.1", "8.8.8.8"]
+    merged["dns"] = _merged_dns(merged.get("dns"))
 
     if merged == current:
         return
