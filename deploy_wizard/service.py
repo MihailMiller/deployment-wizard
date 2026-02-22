@@ -69,10 +69,13 @@ def deploy_compose_source(cfg: Config) -> None:
     compose_path = cfg.source_compose_path
     if compose_path is None:
         raise ValueError("Compose source deployment requires a compose file.")
+    services = ""
+    if cfg.compose_services:
+        services = " " + " ".join(quote(s) for s in cfg.compose_services)
     cmd = (
         f"cd {quote(str(cfg.source_dir))} && "
         f"docker compose -p {quote(cfg.compose_project_name)} "
-        f"-f {quote(str(compose_path))} up -d --build"
+        f"-f {quote(str(compose_path))} up -d --build{services}"
     )
     if not _run_with_retries(
         cmd,

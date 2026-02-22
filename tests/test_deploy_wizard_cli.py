@@ -15,17 +15,29 @@ class DeployWizardCliTests(unittest.TestCase):
     def test_build_config_with_compose_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             src = Path(td)
-            (src / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  api:\n"
+                "    image: example/api:latest\n"
+                "  worker:\n"
+                "    image: example/worker:latest\n",
+                encoding="utf-8",
+            )
             cfg = build_config(
                 [
                     "--service-name",
                     "demo",
                     "--source-dir",
                     str(src),
+                    "--compose-service",
+                    "api",
+                    "--compose-service",
+                    "worker",
                 ]
             )
             self.assertEqual(cfg.source_kind, SourceKind.COMPOSE)
             self.assertEqual(cfg.service_name, "demo")
+            self.assertEqual(cfg.compose_services, ("api", "worker"))
 
     def test_build_config_with_dockerfile_ports(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -61,6 +73,7 @@ class DeployWizardCliTests(unittest.TestCase):
         self.assertIn("--service-name", proc.stdout)
         self.assertIn("--source-dir", proc.stdout)
         self.assertIn("--registry-retries", proc.stdout)
+        self.assertIn("--compose-service", proc.stdout)
 
 
 if __name__ == "__main__":

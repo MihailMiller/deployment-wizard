@@ -11,6 +11,7 @@ It deploys a service from a local directory that contains either:
 - Interactive wizard and batch mode
 - Service-name based deployment isolation via Docker Compose project names
 - Auto-detect compose vs Dockerfile sources
+- Compose service multi-select (deploy all or chosen services)
 - Idempotent host bootstrap for Ubuntu + Docker
 - Automatic retry for transient Docker registry/network failures
 - Docker daemon network tuning to reduce `connection reset by peer` pull errors
@@ -50,6 +51,7 @@ Key flags:
 - `--base-dir`
 - `--host-port` + `--container-port` (for Dockerfile mode)
 - `--bind-host`
+- `--compose-service` (repeat for multiple compose services; default is all)
 - `--registry-retries`
 - `--retry-backoff-seconds`
 - `--no-docker-daemon-tuning`

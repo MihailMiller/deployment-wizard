@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
+from shlex import quote
 from typing import Any, Callable, List, Optional
 
 from deploy_wizard.log import LOG_PATH, log_line
@@ -121,16 +122,24 @@ def _print_summary(cfg) -> None:
         print(f"Compose file : {cfg.managed_compose_path}")
     else:
         print(f"Compose file : {cfg.source_compose_path}")
+    if cfg.source_kind.value == "compose":
+        if cfg.compose_services:
+            print(f"Services     : {', '.join(cfg.compose_services)}")
+        else:
+            print("Services     : all")
     print()
     print("Useful commands:")
     compose_file = cfg.managed_compose_path if cfg.source_kind.value == "dockerfile" else cfg.source_compose_path
+    services = ""
+    if cfg.compose_services and cfg.source_kind.value == "compose":
+        services = " " + " ".join(quote(s) for s in cfg.compose_services)
     print(
         "  docker compose "
         f"-p {cfg.compose_project_name} "
-        f"-f {compose_file} ps"
+        f"-f {compose_file} ps{services}"
     )
     print(
         "  docker compose "
         f"-p {cfg.compose_project_name} "
-        f"-f {compose_file} logs -f"
+        f"-f {compose_file} logs -f{services}"
     )

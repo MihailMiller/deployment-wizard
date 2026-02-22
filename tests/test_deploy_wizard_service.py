@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest import mock
 
 from deploy_wizard.config import Config, SourceKind
-from deploy_wizard.service import _run_with_retries, write_generated_compose
+from deploy_wizard.service import _run_with_retries, deploy_compose_source, write_generated_compose
 
 
 class DeployWizardServiceTests(unittest.TestCase):
@@ -73,6 +73,29 @@ class DeployWizardServiceTests(unittest.TestCase):
         self.assertEqual(sh_mock.call_count, 3)
         # attempts=3 means 2 sleeps between attempts
         self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_deploy_compose_source_with_selected_services(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            (src / "docker-compose.yml").write_text(
+                "services:\n"
+                "  api:\n"
+                "    image: example/api:latest\n"
+                "  worker:\n"
+                "    image: example/worker:latest\n",
+                encoding="utf-8",
+            )
+            cfg = Config(
+                service_name="demo",
+                source_dir=src,
+                source_kind=SourceKind.COMPOSE,
+                compose_services=("api", "worker"),
+            )
+            with mock.patch("deploy_wizard.service._run_with_retries", return_value=True) as run_mock:
+                deploy_compose_source(cfg)
+
+        cmd = run_mock.call_args[0][0]
+        self.assertIn(" up -d --build api worker", cmd)
 
 
 if __name__ == "__main__":

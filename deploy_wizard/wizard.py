@@ -8,7 +8,13 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from deploy_wizard.config import Config, SourceKind, detect_source_kind, find_compose_file
+from deploy_wizard.config import (
+    Config,
+    SourceKind,
+    detect_source_kind,
+    find_compose_file,
+    list_compose_services,
+)
 
 
 def _prompt(msg: str, default: str = "") -> str:
@@ -53,6 +59,39 @@ def _choose(options: List[Tuple[str, str]], default: int = 1) -> int:
         except ValueError:
             pass
         print(f"Please enter a number between 1 and {len(options)}.")
+
+
+def _choose_services(services: List[str]) -> Optional[Tuple[str, ...]]:
+    print("Compose services found:")
+    for idx, name in enumerate(services, 1):
+        print(f"  [{idx}] {name}")
+    print("Enter comma-separated numbers or names, or press Enter to deploy all services.")
+
+    while True:
+        raw = _prompt("Services", "")
+        if not raw:
+            return None
+
+        chosen: List[str] = []
+        tokens = [token.strip() for token in raw.split(",") if token.strip()]
+        for token in tokens:
+            if token.isdigit():
+                idx = int(token)
+                if not (1 <= idx <= len(services)):
+                    chosen = []
+                    break
+                name = services[idx - 1]
+            else:
+                if token not in services:
+                    chosen = []
+                    break
+                name = token
+            if name not in chosen:
+                chosen.append(name)
+
+        if chosen:
+            return tuple(chosen)
+        print("Invalid selection. Use listed numbers or exact service names.")
 
 
 def _pick_source_dir() -> Tuple[Path, SourceKind]:
@@ -100,6 +139,14 @@ def run_wizard() -> Config:
     host_port: Optional[int] = None
     container_port: Optional[int] = None
     bind_host = "127.0.0.1"
+    compose_services: Optional[Tuple[str, ...]] = None
+
+    if source_kind == SourceKind.COMPOSE:
+        compose_path = find_compose_file(source_dir)
+        if compose_path is not None:
+            discovered = list_compose_services(compose_path)
+            if discovered:
+                compose_services = _choose_services(discovered)
 
     if source_kind == SourceKind.DOCKERFILE:
         if _confirm("Expose a host port for this service?", default=False):
@@ -115,6 +162,7 @@ def run_wizard() -> Config:
         host_port=host_port,
         container_port=container_port,
         bind_host=bind_host,
+        compose_services=compose_services,
     )
 
     print()
@@ -127,6 +175,10 @@ def run_wizard() -> Config:
         print(f"  Port mapping : {cfg.bind_host}:{cfg.host_port}->{cfg.container_port}")
     else:
         print("  Port mapping : none")
+    if cfg.source_kind == SourceKind.COMPOSE and cfg.compose_services:
+        print(f"  Compose svcs : {', '.join(cfg.compose_services)}")
+    elif cfg.source_kind == SourceKind.COMPOSE:
+        print("  Compose svcs : all")
     print()
 
     if not _confirm("Proceed with deployment?", default=True):

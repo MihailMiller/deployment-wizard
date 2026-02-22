@@ -60,6 +60,16 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
         action="store_true",
         help="Skip docker daemon network hardening for flaky registry connections.",
     )
+    parser.add_argument(
+        "--compose-service",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Compose service name to deploy. Repeat for multiple values. "
+            "Default: deploy all services."
+        ),
+    )
 
     raw = parser.parse_args(argv)
     try:
@@ -74,6 +84,7 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
             registry_retries=raw.registry_retries,
             retry_backoff_seconds=raw.retry_backoff_seconds,
             tune_docker_daemon=not raw.no_docker_daemon_tuning,
+            compose_services=tuple(raw.compose_service) if raw.compose_service else None,
         )
     except ValueError as exc:
         parser.error(str(exc))
