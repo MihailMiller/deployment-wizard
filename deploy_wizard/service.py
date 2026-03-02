@@ -442,7 +442,7 @@ def _render_route_locations(routes, auth_guard: str) -> str:
     # Use Docker's internal resolver (127.0.0.11) with a variable-based upstream so
     # that nginx resolves hostnames lazily at request time rather than at config-load
     # time.  Without this, nginx crashes repeatedly during startup because upstream
-    # containers (e.g. docslice) may not yet exist in Docker's DNS when nginx first
+    # containers (e.g. assistant) may not yet exist in Docker's DNS when nginx first
     # starts — a common problem when upstreams have slow-starting dependencies.
     blocks = []
     for route in routes:
