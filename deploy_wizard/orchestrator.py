@@ -71,8 +71,12 @@ def run_steps(steps: List[Step], bar: Any) -> None:
 
 
 def run_deploy(cfg) -> None:
-    from deploy_wizard.config import IngressMode
-    from deploy_wizard.service import deploy_service, ensure_required_ports_available
+    from deploy_wizard.config import AccessMode, IngressMode
+    from deploy_wizard.service import (
+        configure_tailscale_https,
+        deploy_service,
+        ensure_required_ports_available,
+    )
     from deploy_wizard.system import (
         detect_ubuntu,
         ensure_base_packages,
@@ -107,15 +111,25 @@ def run_deploy(cfg) -> None:
             ),
             Step("Check required host ports", lambda: ensure_required_ports_available(cfg)),
             Step("Deploy service", lambda: deploy_service(cfg)),
+            Step(
+                "Configure Tailscale HTTPS",
+                lambda: configure_tailscale_https(cfg),
+                skip_if=lambda: cfg.access_mode != AccessMode.TAILSCALE,
+            ),
         ]
         with tqdm(total=len(steps), desc="Deploying service", unit="step") as bar:
             run_steps(steps, bar)
-        _print_summary(cfg)
+        tailscale_url = ""
+        for step in steps:
+            if step.label == "Configure Tailscale HTTPS":
+                tailscale_url = str(step.result or "")
+                break
+        _print_summary(cfg, tailscale_url=tailscale_url)
     finally:
         log_line(f"=== END {dt.datetime.now(dt.timezone.utc).isoformat()}Z ===")
 
 
-def _print_summary(cfg) -> None:
+def _print_summary(cfg, *, tailscale_url: str = "") -> None:
     print()
     print("+----------------------------------------------------+")
     print("| Deployment complete                                |")
@@ -153,6 +167,8 @@ def _print_summary(cfg) -> None:
         print(f"Domain       : {cfg.domain}")
         if len(cfg.cert_domain_names) > 1:
             print(f"TLS domains  : {', '.join(cfg.cert_domain_names)}")
+    if tailscale_url:
+        print(f"Tailscale URL: {tailscale_url}")
     if cfg.auth_token is not None:
         print("Auth token   : enabled")
     else:
@@ -208,3 +224,5 @@ def _print_summary(cfg) -> None:
             f"  certbot renew && nginx -t && systemctl reload nginx "
             f"# site: {cfg.host_nginx_site_name}"
         )
+    if cfg.access_mode.value == "tailscale":
+        print("  tailscale serve status")

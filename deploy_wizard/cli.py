@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind
+from deploy_wizard.config import AccessMode, Config, IngressMode, SourceKind, default_base_dir
 
 
 def build_config(argv: Optional[List[str]] = None) -> Config:
@@ -29,9 +29,9 @@ def build_config(argv: Optional[List[str]] = None) -> Config:
     )
     parser.add_argument(
         "--base-dir",
-        default="/opt/services",
+        default=str(default_base_dir()),
         metavar="DIR",
-        help="Deployment state directory by service name. (default: /opt/services)",
+        help="Deployment state directory by service name.",
     )
     parser.add_argument("--host-port", type=int, default=None, metavar="PORT")
     parser.add_argument("--container-port", type=int, default=None, metavar="PORT")

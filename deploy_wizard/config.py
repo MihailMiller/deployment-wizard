@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -556,12 +556,18 @@ def detect_source_kind(source_dir: Path) -> SourceKind:
     )
 
 
+def default_base_dir() -> Path:
+    if os.name == "nt":
+        return Path.home() / ".deployment" / "services"
+    return Path("/opt/services")
+
+
 @dataclass(frozen=True)
 class Config:
     service_name: str
     source_dir: Path
     source_kind: SourceKind = SourceKind.AUTO
-    base_dir: Path = Path("/opt/services")
+    base_dir: Path = field(default_factory=default_base_dir)
     host_port: Optional[int] = None
     container_port: Optional[int] = None
     bind_host: str = "127.0.0.1"
@@ -715,8 +721,9 @@ class Config:
             and not self.reverse_proxy_enabled
         ):
             raise ValueError(
-                "access_mode for compose sources requires domain or auth_token "
-                "(managed proxy mode)."
+                "access_mode for compose sources requires proxy mode. "
+                "Provide domain/auth_token/proxy_route, or set "
+                "proxy_upstream_service + proxy_upstream_port."
             )
 
         if self.tls_enabled:
@@ -896,7 +903,15 @@ class Config:
 
     @property
     def reverse_proxy_enabled(self) -> bool:
-        return self.tls_enabled or self.auth_token is not None or self.proxy_routes is not None
+        return (
+            self.tls_enabled
+            or self.auth_token is not None
+            or self.proxy_routes is not None
+            or self.proxy_upstream_service is not None
+            or self.proxy_upstream_port is not None
+            or self.proxy_http_port is not None
+            or self.proxy_https_port is not None
+        )
 
     @property
     def effective_bind_host(self) -> str:

@@ -47,6 +47,8 @@ def _merged_dns(raw: Any) -> List[str]:
 
 
 def require_root_reexec() -> None:
+    if os.name == "nt":
+        return
     if os.geteuid() == 0:
         return
     if shutil.which("sudo") is None:
@@ -58,6 +60,8 @@ def require_root_reexec() -> None:
 
 
 def detect_ubuntu() -> None:
+    if os.name == "nt":
+        return
     osr = Path("/etc/os-release")
     if not osr.exists():
         die("/etc/os-release not found.")
@@ -67,6 +71,8 @@ def detect_ubuntu() -> None:
 
 
 def ensure_base_packages() -> None:
+    if os.name == "nt":
+        return
     sh("export DEBIAN_FRONTEND=noninteractive; apt-get update -y")
     sh(
         "export DEBIAN_FRONTEND=noninteractive; "
@@ -75,6 +81,8 @@ def ensure_base_packages() -> None:
 
 
 def ensure_nginx_and_certbot() -> None:
+    if os.name == "nt":
+        return
     sh(
         "export DEBIAN_FRONTEND=noninteractive; "
         "apt-get install -y nginx certbot"
@@ -90,6 +98,8 @@ def ensure_docker() -> None:
         ).returncode
         if rc == 0:
             return
+    if os.name == "nt":
+        die("Docker Compose v2 not found. Install Docker Desktop and ensure `docker compose` works.")
     sh("curl -fsSL https://get.docker.com | bash")
 
 
@@ -100,13 +110,16 @@ def ensure_docker_daemon_tuning() -> None:
     - Limit concurrent downloads/uploads to reduce connection resets.
     - Ensure safe, non-loopback DNS resolvers are configured.
     """
+    if os.name == "nt":
+        log_line("[DOCKER] daemon tuning skipped on Windows.")
+        return
+
     daemon_path = Path("/etc/docker/daemon.json")
     current: dict = {}
     if daemon_path.exists():
         try:
             current = json.loads(daemon_path.read_text(encoding="utf-8"))
         except Exception:
-            # Preserve operability: start from empty if daemon.json is unreadable.
             current = {}
 
     merged = dict(current)
@@ -125,3 +138,4 @@ def ensure_docker_daemon_tuning() -> None:
     daemon_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     log_line("[DOCKER] Updated daemon.json with registry retry hardening.")
     sh("systemctl restart docker")
+

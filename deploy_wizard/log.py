@@ -40,7 +40,6 @@ def log_line(s: str) -> None:
         with FALLBACK_LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(s + "\n")
     except Exception:
-        # Logging must never break deployment flow.
         return
 
 
@@ -72,14 +71,22 @@ def sh(
     write(f"\n$ {safe_cmd}")
     log_line(f"\n$ {safe_cmd}")
 
-    proc = subprocess.Popen(
-        ["bash", "-lc", cmd],
+    popen_kwargs = dict(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
-        preexec_fn=os.setsid,
     )
+    if os.name == "nt":
+        popen_kwargs["args"] = ["powershell", "-NoProfile", "-Command", cmd]
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["args"] = ["bash", "-lc", cmd]
+        popen_kwargs["preexec_fn"] = os.setsid
+
+    proc = subprocess.Popen(**popen_kwargs)
 
     try:
         assert proc.stdout is not None
@@ -89,13 +96,20 @@ def sh(
             log_line(redact(line))
     except KeyboardInterrupt:
         write("[WARN] Ctrl-C received. Terminating command...")
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except Exception:
-            pass
+        if os.name == "nt":
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except Exception:
+                pass
         raise
 
     rc = proc.wait()
     if check and rc != 0:
         die(f"Command failed (exit {rc}): {safe_cmd}")
     return rc
+

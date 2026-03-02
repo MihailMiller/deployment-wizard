@@ -5,18 +5,23 @@ Service deployment logic for compose-backed and Dockerfile-backed sources.
 from __future__ import annotations
 
 import base64
+import json
+import os
+import shutil
 import subprocess
 import socket
 import time
+import re
 from pathlib import Path
 from shlex import quote
-from typing import Tuple
+from typing import List, Tuple
 
 from deploy_wizard.config import (
     AccessMode,
     Config,
     IngressMode,
     SourceKind,
+    list_compose_service_host_ports,
     list_missing_compose_env_vars,
 )
 from deploy_wizard.log import die, log_line, sh
@@ -27,28 +32,235 @@ def write_file(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _compose_host_path(path: Path) -> str:
+    text = str(path)
+    if os.name == "nt":
+        return text.replace("\\", "/")
+    return text
+
+
+def _yaml_quoted_path(path: Path) -> str:
+    text = _compose_host_path(path)
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _yaml_quoted_scalar(value: str) -> str:
+    text = str(value)
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _yaml_quoted_volume(host_path: Path, container_spec: str) -> str:
+    return _yaml_quoted_scalar(f"{_compose_host_path(host_path)}:{container_spec}")
+
+
 def _is_loopback_host(value: str) -> bool:
     host = value.strip().lower()
     return host in ("127.0.0.1", "localhost", "::1")
 
 
-def _resolve_tailscale_ipv4() -> str:
+def _tailscale_command_candidates() -> Tuple[str, ...]:
+    candidates = []
+    for name in ("tailscale", "tailscale.exe"):
+        path = shutil.which(name)
+        if path:
+            candidates.append(path)
+
+    if os.name == "nt":
+        for var_name in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+            base = os.environ.get(var_name)
+            if not base:
+                continue
+            exe = Path(base) / "Tailscale" / "tailscale.exe"
+            if exe.exists():
+                candidates.append(str(exe))
+
+    # de-duplicate while preserving order
+    seen = set()
+    unique = []
+    for item in candidates:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return tuple(unique)
+
+
+def _first_ipv4(text: str) -> str:
+    for raw in text.splitlines():
+        candidate = raw.strip()
+        if not candidate:
+            continue
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", candidate):
+            return candidate
+    return ""
+
+
+def _resolve_tailscale_ipv4_windows_fallback() -> str:
+    cmd = (
+        "Get-NetIPAddress -AddressFamily IPv4 "
+        "| Where-Object { $_.InterfaceAlias -like '*Tailscale*' -and $_.IPAddress -notlike '169.254*' } "
+        "| Select-Object -ExpandProperty IPAddress -First 1"
+    )
     proc = subprocess.run(
-        ["tailscale", "ip", "-4"],
+        ["powershell", "-NoProfile", "-Command", cmd],
         capture_output=True,
         text=True,
         check=False,
     )
     if proc.returncode != 0:
-        die(
-            "access_mode=tailscale requires a running tailscale client. "
-            "Install and connect Tailscale, or pass --bind-host with your Tailscale IP."
+        return ""
+    return _first_ipv4(proc.stdout)
+
+
+def _resolve_tailscale_ipv4() -> str:
+    for tailscale_cmd in _tailscale_command_candidates():
+        proc = subprocess.run(
+            [tailscale_cmd, "ip", "-4"],
+            capture_output=True,
+            text=True,
+            check=False,
         )
-    for line in proc.stdout.splitlines():
-        candidate = line.strip()
+        if proc.returncode != 0:
+            continue
+        candidate = _first_ipv4(proc.stdout)
         if candidate:
             return candidate
-    die("Could not detect a Tailscale IPv4 address from `tailscale ip -4`.")
+
+    if os.name == "nt":
+        candidate = _resolve_tailscale_ipv4_windows_fallback()
+        if candidate:
+            return candidate
+
+    return ""
+
+
+def _require_tailscale_command() -> str:
+    candidates = _tailscale_command_candidates()
+    if candidates:
+        return candidates[0]
+    if os.name == "nt":
+        die(
+            "Tailscale CLI not found. Install Tailscale for Windows and run "
+            "`tailscale up` first."
+        )
+    die(
+        "Tailscale CLI not found. Install Tailscale and run `tailscale up` first."
+    )
+
+
+def _run_capture(argv: List[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def _tailscale_https_upstream(cfg: Config) -> Tuple[str, int]:
+    bind_host = _resolve_bind_host(cfg)
+    if bind_host in ("", "0.0.0.0", "::"):
+        bind_host = "127.0.0.1"
+
+    if cfg.uses_managed_ingress:
+        return bind_host, int(cfg.effective_proxy_http_port)
+
+    if cfg.source_kind == SourceKind.DOCKERFILE and cfg.host_port is not None:
+        return bind_host, int(cfg.host_port)
+
+    if cfg.source_kind == SourceKind.COMPOSE:
+        compose_path = cfg.source_compose_path
+        host_ports = (
+            list_compose_service_host_ports(compose_path)
+            if compose_path is not None
+            else {}
+        )
+        if cfg.compose_services:
+            primary = cfg.compose_services[0]
+            if primary in host_ports:
+                return "127.0.0.1", int(host_ports[primary])
+        for _service, port in host_ports.items():
+            return "127.0.0.1", int(port)
+
+    die(
+        "Could not infer a host-reachable upstream for Tailscale HTTPS. "
+        "Use managed proxy mode or configure host port publishing."
+    )
+
+
+def _tailscale_dns_name(tailscale_cmd: str) -> str:
+    proc = _run_capture([tailscale_cmd, "status", "--json"])
+    if proc.returncode != 0:
+        return ""
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    self_obj = payload.get("Self")
+    if not isinstance(self_obj, dict):
+        return ""
+    dns_name = str(self_obj.get("DNSName") or "").strip().rstrip(".")
+    return dns_name
+
+
+def configure_tailscale_https(cfg: Config) -> str:
+    if cfg.access_mode != AccessMode.TAILSCALE:
+        return ""
+
+    tailscale_cmd = _require_tailscale_command()
+    upstream_host, upstream_port = _tailscale_https_upstream(cfg)
+    target = f"http://{upstream_host}:{upstream_port}"
+    https_port = 443
+
+    attempts = (
+        [tailscale_cmd, "serve", "--bg", f"--https={https_port}", "/", target],
+        [tailscale_cmd, "serve", "--bg", f"--https={https_port}", target],
+        [tailscale_cmd, "serve", f"--https={https_port}", "/", target],
+        [tailscale_cmd, "serve", f"--https={https_port}", target],
+    )
+
+    failures: List[str] = []
+    for argv in attempts:
+        proc = _run_capture(argv)
+        if proc.returncode == 0:
+            dns_name = _tailscale_dns_name(tailscale_cmd)
+            if dns_name:
+                url = f"https://{dns_name}"
+            else:
+                ip = _resolve_tailscale_ipv4()
+                url = f"https://{ip}" if ip else "https://<tailscale-hostname>"
+            msg = (
+                f"[INFO] Tailscale HTTPS enabled: {url} -> {target} "
+                f"(via {' '.join(argv[1:])})"
+            )
+            print(msg, flush=True)
+            log_line(msg)
+            return url
+
+        combined = (proc.stdout or "") + (proc.stderr or "")
+        snippet = " ".join(combined.strip().split())
+        if len(snippet) > 240:
+            snippet = snippet[:237] + "..."
+        failures.append(f"{' '.join(argv[1:])} => {snippet or f'exit {proc.returncode}'}")
+
+    hint = (
+        "Run `tailscale up` first and ensure this account is allowed to use "
+        "`tailscale serve`."
+    )
+    if os.name == "nt":
+        hint += " On Windows, run the shell with sufficient privileges if required."
+    die(
+        "Failed to configure Tailscale HTTPS.\n"
+        f"Tried target: {target}\n"
+        f"Attempts: {' | '.join(failures)}\n"
+        f"{hint}"
+    )
 
 
 def _resolve_bind_host(cfg: Config) -> str:
@@ -57,7 +269,14 @@ def _resolve_bind_host(cfg: Config) -> str:
     if cfg.access_mode == AccessMode.TAILSCALE:
         if cfg.bind_host and not _is_loopback_host(cfg.bind_host):
             return cfg.bind_host
-        return _resolve_tailscale_ipv4()
+        detected = _resolve_tailscale_ipv4()
+        if detected:
+            return detected
+        log_line(
+            "[WARN] Could not detect Tailscale IPv4 automatically. "
+            "Falling back to bind host 0.0.0.0."
+        )
+        return "0.0.0.0"
     return cfg.bind_host
 
 
@@ -122,7 +341,7 @@ def write_generated_compose(cfg: Config) -> None:
         "services:\n"
         f"  {cfg.service_key}:\n"
         "    build:\n"
-        f"      context: {cfg.source_dir}\n"
+        f"      context: {_yaml_quoted_path(cfg.source_dir)}\n"
         "      dockerfile: Dockerfile\n"
         f"    image: {cfg.compose_project_name}:local\n"
         f"    container_name: {cfg.compose_project_name}\n"
@@ -145,12 +364,15 @@ def write_proxy_compose(cfg: Config) -> None:
     ports = [f'      - "{bind_host}:{cfg.effective_proxy_http_port}:80"\n']
     if cfg.tls_enabled:
         ports.append(f'      - "{bind_host}:{cfg.effective_proxy_https_port}:443"\n')
-    volumes = [f'      - "{nginx_conf}:/etc/nginx/conf.d/default.conf:ro"\n']
+    volumes = [
+        "      - "
+        f"{_yaml_quoted_volume(nginx_conf, '/etc/nginx/conf.d/default.conf:ro')}\n"
+    ]
     if cfg.tls_enabled:
         volumes.extend(
             [
-                f'      - "{acme_dir}:/var/www/certbot"\n',
-                f'      - "{letsencrypt_dir}:/etc/letsencrypt"\n',
+                f"      - {_yaml_quoted_volume(acme_dir, '/var/www/certbot')}\n",
+                f"      - {_yaml_quoted_volume(letsencrypt_dir, '/etc/letsencrypt')}\n",
             ]
         )
     content = (
@@ -170,8 +392,8 @@ def write_proxy_compose(cfg: Config) -> None:
             "    image: certbot/certbot:latest\n"
             '    profiles: ["manual"]\n'
             "    volumes:\n"
-            f'      - "{acme_dir}:/var/www/certbot"\n'
-            f'      - "{letsencrypt_dir}:/etc/letsencrypt"\n'
+            f"      - {_yaml_quoted_volume(acme_dir, '/var/www/certbot')}\n"
+            f"      - {_yaml_quoted_volume(letsencrypt_dir, '/etc/letsencrypt')}\n"
         )
     write_file(cfg.managed_proxy_compose_path, content)
 
@@ -217,14 +439,25 @@ def _render_auth_guard(auth_token: str | None) -> str:
 
 
 def _render_route_locations(routes, auth_guard: str) -> str:
+    # Use Docker's internal resolver (127.0.0.11) with a variable-based upstream so
+    # that nginx resolves hostnames lazily at request time rather than at config-load
+    # time.  Without this, nginx crashes repeatedly during startup because upstream
+    # containers (e.g. docslice) may not yet exist in Docker's DNS when nginx first
+    # starts — a common problem when upstreams have slow-starting dependencies.
     blocks = []
     for route in routes:
+        upstream_var = f"{route.upstream_host}_{route.upstream_port}".replace("-", "_")
+        upstream_set = (
+            "        resolver 127.0.0.11 valid=10s;\n"
+            f"        set ${upstream_var} http://{route.upstream_host}:{route.upstream_port};\n"
+        )
         if route.path_prefix == "/":
             blocks.append(
                 (
                     "    location / {\n"
                     f"{auth_guard}"
-                    f"        proxy_pass http://{route.upstream_host}:{route.upstream_port};\n"
+                    f"{upstream_set}"
+                    f"        proxy_pass ${upstream_var};\n"
                     "        proxy_http_version 1.1;\n"
                     "        proxy_set_header Host $host;\n"
                     "        proxy_set_header X-Real-IP $remote_addr;\n"
@@ -243,7 +476,8 @@ def _render_route_locations(routes, auth_guard: str) -> str:
                 "\n"
                 f"    location ^~ {prefix}/ {{\n"
                 f"{auth_guard}"
-                f"        proxy_pass http://{route.upstream_host}:{route.upstream_port}/;\n"
+                f"{upstream_set}"
+                f"        proxy_pass ${upstream_var}/;\n"
                 "        proxy_http_version 1.1;\n"
                 "        proxy_set_header Host $host;\n"
                 "        proxy_set_header X-Real-IP $remote_addr;\n"
@@ -455,6 +689,11 @@ def _compose_prefix(cfg: Config) -> str:
     return f"docker compose -p {quote(cfg.compose_project_name)} {files_part}"
 
 
+def _chain_cmd(*parts: str) -> str:
+    sep = " ; " if os.name == "nt" else " && "
+    return sep.join(part for part in parts if part)
+
+
 def _issue_certificate(cfg: Config) -> None:
     if not cfg.tls_enabled:
         return
@@ -464,15 +703,17 @@ def _issue_certificate(cfg: Config) -> None:
     primary_domain = domains[0]
     certbot_email = cfg.certbot_email or ""
     domains_arg = " ".join(f"-d {quote(name)}" for name in domains)
-    cmd = (
-        f"cd {quote(str(_compose_workdir(cfg)))} && "
-        f"{_compose_prefix(cfg)} run --rm certbot "
-        f"certonly --webroot -w /var/www/certbot "
-        f"--cert-name {quote(primary_domain)} --expand "
-        f"--agree-tos --non-interactive --no-eff-email "
-        f"--email {quote(certbot_email)} "
-        f"{domains_arg} "
-        "--keep-until-expiring"
+    cmd = _chain_cmd(
+        f"cd {quote(str(_compose_workdir(cfg)))}",
+        (
+            f"{_compose_prefix(cfg)} run --rm certbot "
+            f"certonly --webroot -w /var/www/certbot "
+            f"--cert-name {quote(primary_domain)} --expand "
+            f"--agree-tos --non-interactive --no-eff-email "
+            f"--email {quote(certbot_email)} "
+            f"{domains_arg} "
+            "--keep-until-expiring"
+        ),
     )
     if not _run_with_retries(
         cmd,
@@ -492,10 +733,10 @@ def _reload_nginx(cfg: Config) -> None:
         return
     workdir = quote(str(_compose_workdir(cfg)))
     prefix = _compose_prefix(cfg)
-    reload_cmd = f"cd {workdir} && {prefix} exec -T nginx nginx -s reload"
+    reload_cmd = _chain_cmd(f"cd {workdir}", f"{prefix} exec -T nginx nginx -s reload")
     if sh(reload_cmd, check=False) == 0:
         return
-    up_cmd = f"cd {workdir} && {prefix} up -d nginx"
+    up_cmd = _chain_cmd(f"cd {workdir}", f"{prefix} up -d nginx")
     if sh(up_cmd, check=False) != 0:
         die("Failed to start nginx container for TLS reload.")
     if sh(reload_cmd, check=False) != 0:
@@ -695,9 +936,16 @@ def deploy_compose_source(cfg: Config) -> None:
     services_arg = ""
     if services:
         services_arg = " " + " ".join(quote(s) for s in services)
-    cmd = (
-        f"cd {quote(str(_compose_workdir(cfg)))} && "
-        f"{_compose_prefix(cfg)} up -d --build{services_arg}"
+    workdir = quote(str(_compose_workdir(cfg)))
+    prefix = _compose_prefix(cfg)
+    # Stop and remove any existing containers before deploying.  `rm -sf` stops
+    # running containers first (-s), then force-removes them (-f).  Without -s,
+    # running containers are silently skipped and the subsequent `compose up`
+    # fails with a "container name already in use" conflict.
+    sh(_chain_cmd(f"cd {workdir}", f"{prefix} rm -sf{services_arg}"), check=False)
+    cmd = _chain_cmd(
+        f"cd {workdir}",
+        f"{prefix} up -d --build --remove-orphans{services_arg}",
     )
     if not _run_with_retries(
         cmd,
@@ -724,9 +972,13 @@ def deploy_dockerfile_source(cfg: Config) -> None:
         write_proxy_compose(cfg)
         write_nginx_proxy_config(cfg, https_enabled=False)
         services = f"{cfg.service_key} nginx"
-    cmd = (
-        f"cd {quote(str(_compose_workdir(cfg)))} && "
-        f"{_compose_prefix(cfg)} up -d --build {services}"
+    workdir = quote(str(_compose_workdir(cfg)))
+    prefix = _compose_prefix(cfg)
+    # Pre-flight cleanup — same reasoning as in deploy_compose_source.
+    sh(_chain_cmd(f"cd {workdir}", f"{prefix} rm -sf {services}"), check=False)
+    cmd = _chain_cmd(
+        f"cd {workdir}",
+        f"{prefix} up -d --build --remove-orphans {services}",
     )
     if not _run_with_retries(
         cmd,
