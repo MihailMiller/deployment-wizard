@@ -496,6 +496,7 @@ def _render_http_proxy_server(host: str, routes, auth_guard: str, *, acme_root: 
         "server {\n",
         "    listen 80;\n",
         f"    server_name {host};\n",
+        "    client_max_body_size 64m;\n",
         "\n",
     ]
     if acme_root:
@@ -567,6 +568,7 @@ def _render_https_proxy_server(
         "server {\n"
         "    listen 443 ssl;\n"
         f"    server_name {host};\n"
+        "    client_max_body_size 64m;\n"
         "\n"
         f"    ssl_certificate /etc/letsencrypt/live/{cert_base_domain}/fullchain.pem;\n"
         f"    ssl_certificate_key /etc/letsencrypt/live/{cert_base_domain}/privkey.pem;\n"
